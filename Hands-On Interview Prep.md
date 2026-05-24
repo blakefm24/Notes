@@ -1,12 +1,12 @@
 # Nintendo Cloud Security Engineer: Technical Prep
 
-**Tuesday, May 26 — 90 minutes with the security engineering team.** This isn't a trivia quiz. The format is a live incident scenario for a NOA-like company (multi-department AWS environment with customer-facing web services), with real GuardDuty/Wiz screenshots, working through triage, prioritization, and remediation out loud. CoderPad is included for live scripting demos — quick Python/Bash to solve a problem they surface, not a LeetCode exercise. The recruiter says the team keeps it light (top-tier memes); treat it as a working session, not a grilling. Prep below is organized around their six evaluation criteria.
+**Tuesday, May 26 (90 minutes) with the security engineering team.** This isn't a trivia quiz (or so they say :P). The format is a live incident scenario for a NOA-like company (multi-department AWS environment with customer-facing web services), with real GuardDuty/Wiz screenshots, working through triage, prioritization, and remediation out loud. CoderPad is included for live scripting demos: quick Python/Bash to solve a problem they surface, not a LeetCode exercise. The recruiter says the team keeps it light (top-tier memes); treat it as a working session, not a grilling. Prep below is organized around their six evaluation criteria.
 
 | Detail | Value |
 | --- | --- |
 | Interview Length | 90 min with security engineering team |
 | Core Format | 1 incident, GuardDuty/Wiz triggered |
-| Scripting Demo | CoderPad — Python/Bash expected |
+| Scripting Demo | CoderPad: Python/Bash expected |
 | Evaluation Criteria | 6 areas listed by recruiter |
 
 ## Table of contents
@@ -33,10 +33,10 @@
 The evaluation targets thought process, not a rubric of AWS service names.
 
 When incident screenshots are shown, use this mental model:
-1. **Orient:** Read the GuardDuty/Wiz finding. State what type of alert it is (e.g., "This is a `Recon:EC2/PortProbeUnprotectedPort` finding — someone is probing an exposed port"). Ask clarifying questions about the environment: how many accounts, what services are in scope, what logging exists.
-2. **Prioritize:** Assess severity. Is this active exploitation or a misconfiguration? What's the blast radius — is sensitive data (customer PII, game IP) reachable from the affected resource? Name what to triage first and why.
-3. **Contain:** Describe immediate actions — isolate the resource, revoke credentials, preserve evidence. Be specific about which AWS actions to take.
-4. **Investigate:** Walk through the evidence chain — CloudTrail for API activity, VPC Flow Logs for network, S3 access logs for data exfil. Connect findings across the six evaluation areas.
+1. **Orient:** Read the GuardDuty/Wiz finding. State what type of alert it is (e.g., "This is a `Recon:EC2/PortProbeUnprotectedPort` finding: someone is probing an exposed port"). Ask clarifying questions about the environment: how many accounts, what services are in scope, what logging exists.
+2. **Prioritize:** Assess severity. Is this active exploitation or a misconfiguration? What's the blast radius? Is sensitive data (customer PII, game IP) reachable from the affected resource? Name what to triage first and why.
+3. **Contain:** Describe immediate actions: isolate the resource, revoke credentials, preserve evidence. Be specific about which AWS actions to take.
+4. **Investigate:** Walk through the evidence chain: CloudTrail for API activity, VPC Flow Logs for network, S3 access logs for data exfil. Connect findings across the six evaluation areas.
 5. **Remediate & Harden:** Fix the root cause, then propose preventive controls so it doesn't recur. This is where systems thinking shows. Draw from Sony incident experience when relevant. When asked how to handle the scenario, anchor in a real story: "At Sony, we had a similar situation where..." then map it to the scenario presented.
 
 ---
@@ -47,19 +47,19 @@ When incident screenshots are shown, use this mental model:
 
 ### Core Knowledge
 - **What it analyzes:** CloudTrail management & data events, VPC Flow Logs, DNS query logs, EKS audit logs, S3 data events, Lambda network activity, and RDS login events. These are *protection plans* that can be individually enabled.
-- **Common gap:** GuardDuty is enabled but S3 Protection or EKS Protection is off — the org thinks they're covered, but entire data planes are unmonitored. If an incident is shown and they ask "why didn't we catch this sooner," check which protection plans are active.
+- **Common gap:** GuardDuty is enabled but S3 Protection or EKS Protection is off; the org thinks they're covered, but entire data planes are unmonitored. If an incident is shown and they ask "why didn't we catch this sooner," check which protection plans are active.
 - **Finding types to know cold:**
-  - `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS` — EC2 role credentials used from outside AWS
-  - `Recon:EC2/PortProbeUnprotectedPort` — open port being scanned
-  - `Trojan:EC2/C&CActivity.B` — instance calling a C2 server
-  - `Policy:S3/BucketPublicAccessGranted` — bucket made public
-  - `Stealth:S3/ServerAccessLoggingDisabled` — logging turned off (covering tracks)
+  - `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS`: EC2 role credentials used from outside AWS
+  - `Recon:EC2/PortProbeUnprotectedPort`: open port being scanned
+  - `Trojan:EC2/C&CActivity.B`: instance calling a C2 server
+  - `Policy:S3/BucketPublicAccessGranted`: bucket made public
+  - `Stealth:S3/ServerAccessLoggingDisabled`: logging turned off (covering tracks)
 - **Multi-account:** Use delegated admin in AWS Organizations so GuardDuty findings aggregate to a central security account. If they have departments using separate AWS accounts, this is likely their setup.
 - **Runtime Monitoring:** GuardDuty agent deployed to EC2/EKS/ECS for process-level visibility (file access, network connections, process execution). If not enabled, there is a blind spot between "API-level detection" and "what actually ran on the host."
 
 ### What to Say in the Interview
 
-When the GuardDuty screenshot is shown, read the finding type, severity, affected resource, and actor. Then say something like: *"First question — is this finding from a protection plan that's actively monitored, or did we get lucky? I'd want to audit which GuardDuty features are enabled across all accounts to make sure we don't have coverage gaps."* This demonstrates thinking beyond the single alert.
+When the GuardDuty screenshot is shown, read the finding type, severity, affected resource, and actor. Then say something like: *"First question: is this finding from a protection plan that's actively monitored, or did we get lucky? I'd want to audit which GuardDuty features are enabled across all accounts to make sure we don't have coverage gaps."* This demonstrates thinking beyond the single alert.
 
 ---
 
@@ -68,7 +68,7 @@ When the GuardDuty screenshot is shown, read the finding type, severity, affecte
 > **What They'll Evaluate (from recruiter):** Enabling and retaining audit logs. Using logs for investigations, compliance, and incident response.
 
 ### Core Knowledge
-- **Trail types:** Management events (API calls like `RunInstances`, `CreateBucket`) are enabled by default. Data events (S3 `GetObject`/`PutObject`, Lambda invocations) are *not* — these must be explicitly enabled and cost more, but they're critical for investigating data exfil.
+- **Trail types:** Management events (API calls like `RunInstances`, `CreateBucket`) are enabled by default. Data events (S3 `GetObject`/`PutObject`, Lambda invocations) are *not*; these must be explicitly enabled and cost more, but they're critical for investigating data exfil.
 - **Organization trail:** A single trail in the management account captures events from all member accounts. The incident scenario is multi-department, so expect this to be relevant.
 - **Retention matters:** Default console view is 90 days. For compliance and IR, send events to an S3 bucket with lifecycle policies (keep 1+ year) and to CloudWatch Logs or a SIEM for real-time alerting. If they ask about compliance, mention that SOC 2 and PCI-DSS require durable audit logs.
 - **Log integrity:** Enable CloudTrail log file validation (digest files) to prove logs haven't been tampered with. If an attacker disables CloudTrail (`StopLogging`), GuardDuty detects it as `Stealth:IAMUser/CloudTrailLoggingDisabled`.
@@ -77,7 +77,7 @@ When the GuardDuty screenshot is shown, read the finding type, severity, affecte
 
 ### CoderPad Angle
 
-If scripting is requested, a CloudTrail log parser is likely. Something like: "Given these CloudTrail JSON events, find all API calls made by a specific access key ID after a given timestamp." This is straightforward Python — `json.load`, filter by `userIdentity.accessKeyId` and `eventTime`, print results.
+If scripting is requested, a CloudTrail log parser is likely. Something like: "Given these CloudTrail JSON events, find all API calls made by a specific access key ID after a given timestamp." This is straightforward Python: `json.load`, filter by `userIdentity.accessKeyId` and `eventTime`, print results.
 
 ---
 
@@ -89,13 +89,13 @@ If scripting is requested, a CloudTrail log parser is likely. Something like: "G
 - **Security groups are stateful firewalls.** If inbound is allowed, the return traffic is automatically allowed. NACLs are stateless (both directions must be explicitly allowed).
 - **The red flag:** Inbound rule with `0.0.0.0/0` on port 22 (SSH) or 3389 (RDP). This is the most common misconfiguration they'll test. In the incident scenario, an open port may be the entry point.
 - **Least privilege for SGs:** Reference other security groups instead of CIDR ranges when possible (e.g., "allow inbound 443 from the ALB security group" rather than a /16 block). Use specific CIDR ranges only for known external IPs (VPN, office).
-- **CIDR risk assessment:** `/32` = single host (good). `/24` = 256 IPs. `/16` = 65K IPs. `/0` = the entire internet (almost never appropriate for inbound). Note that `0.0.0.0/0` is IPv4 "everywhere" and `::/0` is IPv6 "everywhere" — both must be locked down.
+- **CIDR risk assessment:** `/32` = single host (good). `/24` = 256 IPs. `/16` = 65K IPs. `/0` = the entire internet (almost never appropriate for inbound). Note that `0.0.0.0/0` is IPv4 "everywhere" and `::/0` is IPv6 "everywhere"; both must be locked down.
 - **Outbound controls:** Default SG allows all outbound traffic. In a security-conscious environment, restrict outbound to necessary ports (443 for HTTPS, specific endpoints). This limits data exfil and C2 callbacks. If the incident involves an EC2 calling out to a malicious IP, unrestricted egress is the root cause.
 - **Containment technique:** During an incident, swap the compromised instance's SG to a pre-staged "quarantine" group that denies all inbound/outbound. This isolates without terminating (preserves forensic evidence).
 
 ### CoderPad Angle
 
-Possible scripting ask: "Write a script to find all security groups with inbound rules open to `0.0.0.0/0`." This is a boto3 one-liner pattern — `describe_security_groups`, iterate rules, check for `0.0.0.0/0` in `IpRanges`. Quick and clean.
+Possible scripting ask: "Write a script to find all security groups with inbound rules open to `0.0.0.0/0`." This is a boto3 one-liner pattern: `describe_security_groups`, iterate rules, check for `0.0.0.0/0` in `IpRanges`. Quick and clean.
 
 ---
 
@@ -104,12 +104,12 @@ Possible scripting ask: "Write a script to find all security groups with inbound
 > **What They'll Evaluate (from recruiter):** Securing S3 buckets/cloud storage. Read/write access across accounts. Encryption, access policies, and data exposure risks.
 
 ### Core Knowledge
-- **Public access controls:** S3 Block Public Access settings exist at both the account level and bucket level. Account-level BPA should be on by default — if a bucket is public, it means someone deliberately (or accidentally) overrode it. Wiz flags this aggressively.
+- **Public access controls:** S3 Block Public Access settings exist at both the account level and bucket level. Account-level BPA should be on by default. If a bucket is public, it means someone deliberately (or accidentally) overrode it. Wiz flags this aggressively.
 - **Bucket policies vs. ACLs:** Modern best practice is to disable ACLs entirely (bucket owner enforced) and use bucket policies for all access control. ACLs are legacy and hard to audit. If the scenario shows an ACL granting access, call it out as a misconfiguration.
 - **Cross-account access:** In a multi-department setup, departments share S3 data via bucket policies with `Principal` set to a specific account/role ARN. The risk: overly broad principals (`"Principal": "*"` or `"Principal": {"AWS": "*"}`). Always scope to specific accounts, roles, and add `aws:PrincipalOrgID` conditions.
 - **Encryption:** SSE-S3 (Amazon-managed keys) is the default since Jan 2023. SSE-KMS provides key management, audit trails via CloudTrail, and the ability to restrict decryption by IAM policy. For sensitive data, SSE-KMS with a customer-managed key (CMK) is the standard.
 - **Data exfil detection:** Enable S3 server access logging or CloudTrail data events for S3. Look for unusual `GetObject` volume, access from unfamiliar IPs, or bulk downloads. GuardDuty's S3 protection detects anomalous access patterns.
-- **VPC endpoints:** Use S3 gateway endpoints with endpoint policies to ensure buckets are only accessible from within the VPC — not over the public internet. This is a data perimeter control.
+- **VPC endpoints:** Use S3 gateway endpoints with endpoint policies to ensure buckets are only accessible from within the VPC, not over the public internet. This is a data perimeter control.
 
 ---
 
@@ -119,7 +119,7 @@ Possible scripting ask: "Write a script to find all security groups with inbound
 
 ### Core Knowledge
 - **Roles on compute:** EC2 instances, Lambda functions, and ECS tasks should use IAM roles (via instance profiles or task roles), never long-lived access keys. The role provides short-term credentials from IMDS (EC2) or the container credential provider (ECS). If the incident involves static keys on an instance, flag it.
-- **Systems Manager (SSM):** The recruiter called this out specifically. The `AmazonSSMManagedInstanceCore` managed policy allows SSM Agent to communicate with Systems Manager — this enables Session Manager access (replaces SSH), patch management, and inventory. The risk: this policy also allows `ssm:SendCommand` which can execute arbitrary commands on instances. Scope it tightly.
+- **Systems Manager (SSM):** The recruiter called this out specifically. The `AmazonSSMManagedInstanceCore` managed policy allows SSM Agent to communicate with Systems Manager; this enables Session Manager access (replaces SSH), patch management, and inventory. The risk: this policy also allows `ssm:SendCommand` which can execute arbitrary commands on instances. Scope it tightly.
 - **Least privilege design:** Start with zero permissions and add. Use IAM Access Analyzer to generate policies from CloudTrail activity. Scope resources to specific ARNs (not `*`). Add conditions: `aws:SourceVpc`, `aws:RequestedRegion`, `aws:PrincipalTag`.
 - **Policy evaluation order:** Implicit deny → SCPs → Resource policies → Permission boundaries → Session policies → Identity policies. Explicit deny always wins.
 - **Privilege escalation patterns:** `iam:PassRole` + compute creation (EC2/Lambda) is the most common. `iam:CreatePolicyVersion` with `--set-as-default` is the sneakiest. `iam:AttachRolePolicy` to grant AdministratorAccess is the loudest (easy to detect in CloudTrail).
@@ -127,7 +127,7 @@ Possible scripting ask: "Write a script to find all security groups with inbound
 
 ### CoderPad Angle
 
-Possible ask: "Find all IAM roles with AdministratorAccess attached" or "List all roles that haven't been used in 90 days." Both are `boto3` scripts — `list_roles()` → `list_attached_role_policies()`, or `get_role()` → check `RoleLastUsed`.
+Possible ask: "Find all IAM roles with AdministratorAccess attached" or "List all roles that haven't been used in 90 days." Both are `boto3` scripts: `list_roles()` → `list_attached_role_policies()`, or `get_role()` → check `RoleLastUsed`.
 
 ---
 
@@ -139,7 +139,7 @@ Possible ask: "Find all IAM roles with AdministratorAccess attached" or "List al
 - **Enforce HTTPS everywhere:** Ensure S3 bucket policies include a `Deny` statement with condition `"aws:SecureTransport": "false"` to block HTTP. Redirect HTTP → HTTPS on ALBs and CloudFront. TLS 1.2+ minimum.
 - **Outbound restriction:** Default security groups allow all egress. Lock egress down to only necessary destinations: port 443 for HTTPS to known endpoints, NTP (port 123), DNS (port 53). Use VPC endpoints for AWS services (S3, SSM, CloudWatch) to keep traffic off the public internet entirely.
 - **Why outbound matters:** Unrestricted egress is how data gets exfiltrated and how compromised instances reach C2 servers. If the incident shows an EC2 instance calling out to an unknown IP on port 443, the question is "why was this allowed?" The answer: no egress filtering.
-- **NAT Gateway vs. VPC Endpoints:** NAT Gateways route all outbound to the internet — traffic is visible in Flow Logs but destination cannot be restricted. VPC endpoints are direct, private connections to specific AWS services with their own access policies. Prefer endpoints for AWS API traffic.
+- **NAT Gateway vs. VPC Endpoints:** NAT Gateways route all outbound to the internet; traffic is visible in Flow Logs but destination cannot be restricted. VPC endpoints are direct, private connections to specific AWS services with their own access policies. Prefer endpoints for AWS API traffic.
 - **SSH / RDP elimination:** Use SSM Session Manager instead of opening port 22/3389. Sessions are logged, auditable, and don't require inbound SG rules. This connects back to the SSM managed policy discussion in the IAM section.
 - **Network segmentation:** In a multi-department company like the scenario describes, use separate VPCs or subnets per department with VPC peering or Transit Gateway. Security groups and NACLs enforce inter-department boundaries. Private subnets for compute, public subnets only for load balancers.
 
@@ -151,7 +151,7 @@ Possible ask: "Find all IAM roles with AdministratorAccess attached" or "List al
 
 Based on the recruiter's description, below is a plausible incident walkthrough that ties all six evaluation areas together. Practice narrating the response aloud.
 
-- **Alert:** Wiz flags an S3 bucket in the data analytics department's account as publicly accessible. Minutes later, GuardDuty fires `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS` — an EC2 role's credentials are being used from an external IP.
+- **Alert:** Wiz flags an S3 bucket in the data analytics department's account as publicly accessible. Minutes later, GuardDuty fires `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS`: an EC2 role's credentials are being used from an external IP.
 - **Triage (GuardDuty + S3):** Correlate the two alerts. The EC2 instance has an IAM role with broad S3 read access. The instance is in a public subnet with a security group allowing inbound `0.0.0.0/0` on port 80. Check: does it have IMDSv2 enforced? If `HttpTokens: optional`, an SSRF against the web app on port 80 could have harvested credentials from IMDSv1.
 - **Contain (SG + IAM):** Swap the instance's security group to a quarantine SG (deny all in/out). Revoke the role's active sessions using a deny policy with `aws:TokenIssueTime` condition. Snapshot the EBS volume for forensics.
 - **Investigate (CloudTrail):** Query CloudTrail for all API calls made by the compromised role's access key in the last 72 hours. Look for: `ListBuckets`, `GetObject` (data exfil), `CreateAccessKey` (persistence), any IAM modifications. Check VPC Flow Logs for the external IP that used the stolen credentials.
@@ -168,7 +168,7 @@ Based on the recruiter's description, below is a plausible incident walkthrough 
 
 ## CoderPad: Python Snippets
 
-The CoderPad is for demonstrating how to automate a response or audit — not a LeetCode test. Write clean, readable code. The focus is knowing the right boto3 calls and structuring a script logically. Keep these patterns in mind; adapt them to whatever the scenario asks for.
+The CoderPad is for demonstrating how to automate a response or audit, not a LeetCode test. Write clean, readable code. The focus is knowing the right boto3 calls and structuring a script logically. Keep these patterns in mind; adapt them to whatever the scenario asks for.
 
 ### 1. Find Security Groups Open to the Internet
 
@@ -250,7 +250,7 @@ def find_imdsv1_instances():
                 if inst['State']['Name'] in TERMINAL_STATES:
                     continue
                 md = inst.get('MetadataOptions', {})
-                # IMDS disabled — not reachable, not in scope for SSRF cred theft
+                # IMDS disabled; not reachable, not in scope for SSRF cred theft
                 if md.get('HttpEndpoint') == 'disabled':
                     continue
                 if md.get('HttpTokens') != 'required':
@@ -306,7 +306,7 @@ def quarantine_instance(instance_id, quarantine_sg_id):
     print(f"Original SGs: {original_sgs}")
 
     # STEP 1: Snapshot EBS volumes before isolation (common IR playbook).
-    # Instance store volumes are not captured — note that in the interview.
+    # Instance store volumes are not captured; note that in the interview.
     for bdm in instance.get('BlockDeviceMappings', []):
         if 'Ebs' not in bdm:
             continue
@@ -325,14 +325,14 @@ def quarantine_instance(instance_id, quarantine_sg_id):
         )
         print(f"Snapshot created: {snap['SnapshotId']} for volume {vol_id}")
 
-    # STEP 2: Network isolation — swap to quarantine SG (no in/out).
+    # STEP 2: Network isolation: swap to quarantine SG (no in/out).
     ec2.modify_instance_attribute(
         InstanceId=instance_id,
         Groups=[quarantine_sg_id],
     )
     print(f"Swapped SGs to quarantine: {quarantine_sg_id}")
 
-    # STEP 3: Tag for coordination (truncate SG list — tag value max 256 chars).
+    # STEP 3: Tag for coordination (truncate SG list; tag value max 256 chars).
     ec2.create_tags(
         Resources=[instance_id],
         Tags=[
@@ -409,7 +409,7 @@ investigate_access_key('ASIA1234567890EXAMPLE')
 
 ### 5. Re-Enable CloudTrail Logging
 
-**Likely prompt:** GuardDuty fires `Stealth:IAMUser/CloudTrailLoggingDisabled` — an attacker (or misconfiguration) stopped logging to cover tracks. "How would you find and fix all disabled trails?"
+**Likely prompt:** GuardDuty fires `Stealth:IAMUser/CloudTrailLoggingDisabled`: an attacker (or misconfiguration) stopped logging to cover tracks. "How would you find and fix all disabled trails?"
 
 ```python
 import boto3
@@ -442,14 +442,14 @@ def reenable_cloudtrail_logging():
                     'last_delivery': str(stop_time),
                 })
             else:
-                print("  ✗ Failed to re-enable — investigate manually")
+                print("  ✗ Failed to re-enable; investigate manually")
         else:
-            print(f"[OK] {trail_name} — logging active")
+            print(f"[OK] {trail_name}: logging active")
 
     print(f"\nResults: {len(fixed)} trail(s) re-enabled out of {len(trails)} total")
     if fixed:
         print("\nNext steps:")
-        print("  1. Query CloudTrail for StopLogging — identify who disabled logging")
+        print("  1. Query CloudTrail for StopLogging: identify who disabled logging")
         print("  2. Verify log file validation (digest files) is enabled")
         print("  3. Confirm the log delivery S3 bucket exists and is accessible")
         print("  4. Assess log gaps during the disabled window (Athena/Lake)")
@@ -664,7 +664,7 @@ enforce_https('my-sensitive-bucket')
 
 ## Prevention: Service Control Policies
 
-SCPs are guardrails applied at the AWS Organization level. They don't grant permissions — they set the maximum boundary of what's allowed across all accounts in an OU. Even if an IAM admin in a department account attaches AdministratorAccess to a role, an SCP can block the dangerous action. This is the preventive control layer that stops the misconfigurations before they happen. In the interview, propose SCPs in the "harden" step to show organizational-level thinking, not just per-account fixes.
+SCPs are guardrails applied at the AWS Organization level. They don't grant permissions; they set the maximum boundary of what's allowed across all accounts in an OU. Even if an IAM admin in a department account attaches AdministratorAccess to a role, an SCP can block the dangerous action. This is the preventive control layer that stops the misconfigurations before they happen. In the interview, propose SCPs in the "harden" step to show organizational-level thinking, not just per-account fixes.
 
 ### SCP 1: Prevent Disabling GuardDuty
 
@@ -901,7 +901,7 @@ Prevent the most dangerous IAM actions: block access key creation, require IMDSv
 
 ### SCP 6: Restrict Insecure Connectivity
 
-Restrict operations to approved regions and block accepting VPC peering from outside the organization. (Outbound peering requests to external VPCs still need Config/tag guardrails — SCPs cannot evaluate peer CIDRs on `CreateVpcPeeringConnection`.)
+Restrict operations to approved regions and block accepting VPC peering from outside the organization. (Outbound peering requests to external VPCs still need Config/tag guardrails; SCPs cannot evaluate peer CIDRs on `CreateVpcPeeringConnection`.)
 
 ```json
 {
@@ -950,9 +950,9 @@ Restrict operations to approved regions and block accepting VPC peering from out
 
 At the "harden" step of the incident walkthrough, say something like:
 
-> "Beyond fixing this specific misconfiguration, I'd propose org-level SCPs so this class of issue can't recur in any account. For example, we'd deny StopLogging across all member accounts, require IMDSv2 on every EC2 launch, and block public S3 access overrides. These are guardrails that apply even if a department admin has full IAM permissions in their own account — the SCP is the ceiling they can't exceed."
+> "Beyond fixing this specific misconfiguration, I'd propose org-level SCPs so this class of issue can't recur in any account. For example, we'd deny StopLogging across all member accounts, require IMDSv2 on every EC2 launch, and block public S3 access overrides. These are guardrails that apply even if a department admin has full IAM permissions in their own account; the SCP is the ceiling they can't exceed."
 
-This framing matters because it shows the fix is not just the incident — it closes the gap for the whole org. It also connects naturally to the multi-department setup the recruiter described.
+This framing matters because it shows the fix is not just the incident; it closes the gap for the whole org. It also connects naturally to the multi-department setup the recruiter described.
 
 ---
 
@@ -964,13 +964,13 @@ The scenario is *"a similar company to NOA, with multiple departments using AWS 
 - **Multi-department = multi-account:** Each department (game dev, online services, marketing, data analytics) likely has its own AWS account under an Organization. Answers should assume cross-account visibility and centralized security tooling.
 - **"Store and transform data":** S3 + Glue/Athena/EMR pipelines. Data security (encryption, access policies, data perimeters) is a first-class concern. Unreleased game assets in S3 are high-value targets.
 - **"Customer-facing web services":** ALBs, EC2/ECS, API Gateway. Public-facing attack surface. Security group hygiene, WAF configuration, and DDoS protection (Shield) are relevant.
-- **Wiz preference:** They use Wiz for CSPM. Wiz provides a graph-based view of attack paths — e.g., "this publicly exposed EC2 instance has a role that can read from an S3 bucket containing PII." If Wiz experience exists, discuss attack path visualization. Otherwise, describe the concept and willingness to learn the specific tool quickly.
-- **Sony experience:** Sony is another gaming/entertainment company with massive AWS footprint and similar security challenges. Draw direct parallels when answering — "at Sony, we handled multi-account security by..." Strong differentiator.
+- **Wiz preference:** They use Wiz for CSPM. Wiz provides a graph-based view of attack paths (e.g., "this publicly exposed EC2 instance has a role that can read from an S3 bucket containing PII." If Wiz experience exists, discuss attack path visualization. Otherwise, describe the concept and willingness to learn the specific tool quickly.
+- **Sony experience:** Sony is another gaming/entertainment company with massive AWS footprint and similar security challenges. Draw direct parallels when answering: "at Sony, we handled multi-account security by..." Strong differentiator.
 
 ### Questions to Ask Them
 
 - "How many AWS accounts are you managing, and do you use a centralized security account for GuardDuty and Security Hub?"
-- "What does your IR runbook process look like today — is it documented, or are you building it out?"
+- "What does your IR runbook process look like today: is it documented, or are you building it out?"
 - "How do you handle security for game launch events when infrastructure scales rapidly?"
 - "What's the split between proactive engineering (hardening, automation) and reactive work (incidents, tickets) in this role?"
 - "How does the NOA security team coordinate with the global team in Kyoto?"
@@ -979,7 +979,7 @@ The scenario is *"a similar company to NOA, with multiple departments using AWS 
 
 ## Reference: The Capital One Breach
 
-The canonical cloud security incident — good to reference if the scenario is similar.
+The canonical cloud security incident; good to reference if the scenario is similar.
 
 - 2019. Attacker exploited SSRF vulnerability in a misconfigured ModSecurity WAF on EC2.
 - Queried IMDSv1 (`169.254.169.254`) to get temp credentials for the `ISRM-WAF-Role`.
