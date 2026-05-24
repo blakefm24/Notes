@@ -568,7 +568,7 @@ def find_public_buckets():
 find_public_buckets()
 ```
 
-**How it works:** Each bucket is evaluated against three independent exposure vectors. First, Block Public Access (BPA): all four settings (`BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets`) must be true; a missing BPA configuration is itself a finding. Second, the bucket policy: statements with `Effect: Allow` and a public principal (`*` or `Principal: *`) are flagged. Third, the bucket ACL: grants to `AllUsers` (anonymous) or `AuthenticatedUsers` (any AWS account) are flagged. A regional S3 client is created per bucket because `list_buckets` is global but policy and ACL APIs are regional. `ClientError` handling distinguishes "no policy" (expected) from permission errors. Public exposure can exist at any layer even when others are locked down; checking all three reflects defense-in-depth understanding.
+**How it works:** Each bucket is evaluated against three independent exposure vectors. First, Block Public Access (BPA): all four settings (`BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets`) must be true; a missing BPA configuration is itself a finding. Second, the bucket policy: statements with `Effect: Allow` and a public principal (`*` or `Principal: `*) are flagged. Third, the bucket ACL: grants to `AllUsers` (anonymous) or `AuthenticatedUsers` (any AWS account) are flagged. A regional S3 client is created per bucket because `list_buckets` is global but policy and ACL APIs are regional. `ClientError` handling distinguishes "no policy" (expected) from permission errors. Public exposure can exist at any layer even when others are locked down; checking all three reflects defense-in-depth understanding.
 
 ### 7. Find IAM Roles with Admin Access
 
@@ -634,7 +634,7 @@ def find_overprivileged_roles():
 find_overprivileged_roles()
 ```
 
-**How it works:** The script paginates through all IAM roles and checks two permission sources. Attached managed policies are compared against a set of known high-privilege AWS managed policy ARNs (`AdministratorAccess`, `IAMFullAccess`, `PowerUserAccess`). Inline policies are fetched individually and parsed for `Action: *` or `Action: ["...", "*"]` in Allow statements, which grant unrestricted access within the policy's resource scope. A helper normalizes policy documents where `Statement` may be a single object or a list (common in both IAM and S3 policy formats). This audit identifies lateral movement targets after compromise; in the interview, pair findings with remediation paths (scoped custom policies, permission boundaries, SCPs to cap maximum permissions).
+**How it works:** The script paginates through all IAM roles and checks two permission sources. Attached managed policies are compared against a set of known high-privilege AWS managed policy ARNs (`AdministratorAccess`, `IAMFullAccess`, `PowerUserAccess`). Inline policies are fetched individually and parsed for `Action: `* or `Action: ["...", "*"]` in Allow statements, which grant unrestricted access within the policy's resource scope. A helper normalizes policy documents where `Statement` may be a single object or a list (common in both IAM and S3 policy formats). This audit identifies lateral movement targets after compromise; in the interview, pair findings with remediation paths (scoped custom policies, permission boundaries, SCPs to cap maximum permissions).
 
 ### 8. Enforce HTTPS on an S3 Bucket
 
@@ -688,7 +688,7 @@ def enforce_https(bucket_name):
 enforce_https('my-sensitive-bucket')
 ```
 
-**How it works:** The script adds a bucket policy `Deny` statement conditioned on `aws:SecureTransport: false`, which blocks any request not made over TLS regardless of what Allow statements exist elsewhere in the policy (explicit deny wins in AWS policy evaluation). The existing bucket policy is fetched and parsed first; if no policy exists, a new document is created rather than overwriting unrelated configuration. The check for an existing `DenyInsecureTransport` Sid makes the operation idempotent. The deny applies to both the bucket and object ARNs (`bucket/*`). In the interview, note this is a data-at-rest/in-transit control at the bucket layer; it complements (but does not replace) encryption settings and CloudFront/ALB HTTPS termination upstream.
+**How it works:** The script adds a bucket policy `Deny` statement conditioned on `aws:SecureTransport: false`, which blocks any request not made over TLS regardless of what Allow statements exist elsewhere in the policy (explicit deny wins in AWS policy evaluation). The existing bucket policy is fetched and parsed first; if no policy exists, a new document is created rather than overwriting unrelated configuration. The check for an existing `DenyInsecureTransport` Sid makes the operation idempotent. The deny applies to both the bucket and object ARNs (`bucket/`*). In the interview, note this is a data-at-rest/in-transit control at the bucket layer; it complements (but does not replace) encryption settings and CloudFront/ALB HTTPS termination upstream.
 
 ---
 
@@ -1003,6 +1003,7 @@ The scenario is *"a similar company to NOA, with multiple departments using AWS 
 - "How many AWS accounts are you managing, and do you use a centralized security account for GuardDuty and Security Hub?"
 - "What does your IR runbook process look like today: is it documented, or are you building it out?"
 - "How do you handle security for game launch events or holiday seasons when infrastructure scales rapidly?"
+- "Is there an on-call rotation? What does that look like? What are the most common pageable events?"
 - "What's the split between proactive engineering (hardening, automation) and reactive work (incidents, tickets) in this role?"
 - "How does the NOA security team coordinate with the global team in Japan? Are there opportunities for in-person collaboration there?"
 - "Given the small size of your team, how does that impact how you support each other?"
