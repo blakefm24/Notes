@@ -22,6 +22,8 @@
 - [6. Secure Communication & Connectivity](#6-secure-communication--connectivity)
 - [Putting It Together: A Practice Incident](#putting-it-together-a-practice-incident)
 - [CoderPad: Python Snippets](#coderpad-python-snippets)
+- [Wiz Security Graph: Parallel Queries](#wiz-security-graph-parallel-queries)
+- [Log Analysis: Athena & Splunk](#log-analysis-athena--splunk)
 - [Prevention: Service Control Policies](#prevention-service-control-policies)
 - [Nintendo-Specific Angles](#nintendo-specific-angles)
 - [Reference: The Capital One Breach](#reference-the-capital-one-breach)
@@ -78,7 +80,7 @@ When the GuardDuty screenshot is shown, read the finding type, severity, affecte
 - **Retention matters:** Default console view is 90 days. For compliance and IR, send events to an S3 bucket with lifecycle policies (keep 1+ year) and to CloudWatch Logs or a SIEM for real-time alerting. If they ask about compliance, mention that SOC 2 and PCI-DSS require durable audit logs.
 - **Log integrity:** Enable CloudTrail log file validation (digest files) to prove logs haven't been tampered with. If an attacker disables CloudTrail (`StopLogging`), GuardDuty detects it as `Stealth:IAMUser/CloudTrailLoggingDisabled`.
 - **Key fields for investigation:** `eventName`, `userIdentity` (who), `sourceIPAddress` (where), `requestParameters` (what), `eventTime` (when). Filter by access key ID to trace all actions from a specific credential.
-- **Athena for querying:** Create an Athena table over CloudTrail logs in S3 to run SQL queries during an investigation. Fast for questions like "show me all S3 API calls from this IP in the last 72 hours."
+- **Athena for querying:** Create an Athena table over CloudTrail logs in S3 to run SQL queries during an investigation. Fast for questions like "show me all S3 API calls from this IP in the last 72 hours." Sample queries: [Log Analysis: Athena & Splunk](#log-analysis-athena--splunk).
 
 ### CoderPad Angle
 
@@ -163,7 +165,7 @@ Based on the recruiter's description, below is a plausible incident walkthrough 
 - **Alert:** Wiz flags an S3 bucket in the data analytics department's account as publicly accessible. Minutes later, GuardDuty fires `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS`: an EC2 role's credentials are being used from an external IP.
 - **Triage (GuardDuty + S3):** Correlate the two alerts. The EC2 instance has an IAM role with broad S3 read access. The instance is in a public subnet with a security group allowing inbound `0.0.0.0/0` on port 80. Check: does it have IMDSv2 enforced? If `HttpTokens: optional`, an SSRF against the web app on port 80 could have harvested credentials from IMDSv1.
 - **Contain (SG + IAM):** Swap the instance's security group to a quarantine SG (deny all in/out). Revoke the role's active sessions using a deny policy with `aws:TokenIssueTime` condition. Snapshot the EBS volume for forensics.
-- **Investigate (CloudTrail):** Query CloudTrail for all API calls made by the compromised role's access key in the last 72 hours. Look for: `ListBuckets`, `GetObject` (data exfil), `CreateAccessKey` (persistence), any IAM modifications. Check VPC Flow Logs for the external IP that used the stolen credentials.
+- **Investigate (CloudTrail):** Query CloudTrail for all API calls made by the compromised role's access key in the last 72 hours. Look for: `ListBuckets`, `GetObject` (data exfil), `CreateAccessKey` (persistence), any IAM modifications. Check VPC Flow Logs for the external IP that used the stolen credentials. See [Athena & Splunk queries](#log-analysis-athena--splunk).
 - **Remediate (all six areas):**
   - **S3:** Enable account-level Block Public Access. Fix the bucket policy. Enable SSE-KMS.
   - **IAM:** Scope the role to specific bucket ARNs. Remove `s3:`* and replace with `s3:GetObject` on necessary resources only.
@@ -178,6 +180,8 @@ Based on the recruiter's description, below is a plausible incident walkthrough 
 ## CoderPad: Python Snippets
 
 The CoderPad is for demonstrating how to automate a response or audit, not a LeetCode test. Write clean, readable code. The focus is knowing the right boto3 calls and structuring a script logically. Keep these patterns in mind; adapt them to whatever the scenario asks for. Each snippet includes a **How it works** footnote below the code; use these to explain the approach, the key API calls, and any caveats the interviewer might probe on.
+
+For the same audits in steady-state operations, Wiz Security Graph queries (see [Wiz Security Graph: Parallel Queries](#wiz-security-graph-parallel-queries)) are the preferred path; the boto3 scripts remain the IR and CoderPad complement. For full-fidelity investigation over retained logs, pivot to [Athena & Splunk](#log-analysis-athena--splunk).
 
 ### 1. Find Security Groups Open to the Internet
 
@@ -688,7 +692,852 @@ def enforce_https(bucket_name):
 enforce_https('my-sensitive-bucket')
 ```
 
-**How it works:** The script adds a bucket policy `Deny` statement conditioned on `aws:SecureTransport: false`, which blocks any request not made over TLS regardless of what Allow statements exist elsewhere in the policy (explicit deny wins in AWS policy evaluation). The existing bucket policy is fetched and parsed first; if no policy exists, a new document is created rather than overwriting unrelated configuration. The check for an existing `DenyInsecureTransport` Sid makes the operation idempotent. The deny applies to both the bucket and object ARNs (`bucket/`*). In the interview, note this is a data-at-rest/in-transit control at the bucket layer; it complements (but does not replace) encryption settings and CloudFront/ALB HTTPS termination upstream.
+**How it works:** The script adds a bucket policy `Deny` statement conditioned on `aws:SecureTransport: false`, which blocks any request not made over TLS regardless of what Allow statements exist elsewhere in the policy (explicit deny wins in AWS policy evaluation). The existing bucket policy is fetched and parsed first; if no policy exists, a new document is created rather than overwriting unrelated configuration. The check for an existing `DenyInsecureTransport` Sid makes the operation idempotent. The deny applies to both the bucket and object ARNs (`bucket/*`). In the interview, note this is a data-at-rest/in-transit control at the bucket layer; it complements (but does not replace) encryption settings and CloudFront/ALB HTTPS termination upstream.
+
+---
+
+## Wiz Security Graph: Parallel Queries
+
+Wiz answers the same audit questions as the boto3 snippets through the **Security Graph** (relationship-aware search), **Issues / Configuration Findings** (continuous posture rules), and **Attack Paths** (toxic combinations). Exact WQL field names can vary by tenant and graph version; validate queries in **Explore > Security Graph** or the query builder, and use **Ask AI** to translate natural language when syntax is uncertain.
+
+### How to use this section in the interview
+
+| Moment | Lead with |
+|--------|-----------|
+| Steady-state / posture | Wiz Issues or Graph search (continuous, prioritized, attack-path context) |
+| Active IR / CoderPad ask | boto3 (immediate, account-local, chains into containment) |
+| Showing Wiz depth | One natural-language graph query + one attack-path example for the scenario |
+
+**Framing line:** "Day to day, Wiz owns detection and prioritization on the graph; during an incident I'd still hit IAM and EC2 APIs directly to contain and verify scope before the dashboard catches up."
+
+### Query surfaces (three ways to get the same answer)
+
+1. **Security Graph search (WQL):** Text or JSON graph queries over entities and relationships (`FIND` / `WHERE`, `path_to`, `reachable_from`).
+2. **Issues > Filter:** Search open Issues by resource type, rule name, or severity (maps to built-in cloud configuration rules).
+3. **Inventory > Resource page:** Pivot from a known resource (e.g. the bucket from the Wiz alert screenshot) to related risks and attack paths.
+
+---
+
+### 1. Security groups open to the internet
+
+**Python snippet:** [Find Security Groups Open to the Internet](#1-find-security-groups-open-to-the-internet)
+
+**Natural language (Ask AI / search bar):**
+
+- Security groups with inbound or outbound rules allowing `0.0.0.0/0` or `::/0`
+- Internet-exposed security group rules on SSH, RDP, or all ports
+
+**Security Graph (text-style WQL):**
+
+```
+FIND network_security_group
+WHERE rule allows cidr "0.0.0.0/0" OR rule allows cidr "::/0"
+```
+
+```
+FIND virtual_machine
+WHERE exposed_to = "internet"
+AND uses network_security_group with rule allowing "0.0.0.0/0"
+```
+
+**Issues shortcut:** Filter Issues for rules such as "Security group allows ingress from 0.0.0.0/0" or "Unrestricted inbound access" (exact rule title varies by Wiz rule set).
+
+**Depth probe:** Wiz also shows **which workloads** attach to the open SG; boto3 lists rules only. Mention prioritizing SGs attached to internet-facing ENIs.
+
+---
+
+### 2. EC2 instances still on IMDSv1
+
+**Python snippet:** [Find EC2 Instances Still on IMDSv1](#2-find-ec2-instances-still-on-imdsv1)
+
+**Natural language:**
+
+- EC2 instances that do not require IMDSv2
+- Virtual machines with IMDSv1 enabled or `HttpTokens` optional
+
+**Security Graph (text-style WQL):**
+
+```
+FIND virtual_machine
+WHERE cloud_platform = "AWS"
+AND imds_v2_required = false
+AND imds_endpoint != "disabled"
+```
+
+**Issues shortcut:** Configuration finding for IMDSv1 allowed / IMDSv2 not required on EC2.
+
+**Depth probe:** Tie to Capital One: public-facing VM + IMDSv1 + overprivileged instance role + reachable sensitive datastore = critical attack path in Wiz.
+
+---
+
+### 3. Quarantine a compromised instance
+
+**Python snippet:** [Quarantine a Compromised Instance](#3-quarantine-a-compromised-instance)
+
+Wiz does not execute containment; it **identifies** the instance and context for the quarantine decision.
+
+**Natural language:**
+
+- EC2 instances with GuardDuty credential exfiltration or instance credential exfiltration outside AWS
+- Internet-exposed virtual machines with high-severity detections
+
+**Security Graph (attack path):**
+
+```
+FIND virtual_machine
+WHERE exposed_to = "internet"
+AND has_detection type "CredentialAccess"
+```
+
+```
+FIND virtual_machine
+WHERE exposed_to = "internet"
+AND can_access datastore
+AND has_detection severity >= "HIGH"
+```
+
+**Issues / Defend:** Runtime or cloud event Issues linked to the instance; pivot to attached IAM role and reachable S3 buckets from the resource page.
+
+**Depth probe:** "Wiz tells me *what* to isolate and *why*; boto3 snapshots and swaps the SG because Wiz cannot replace IR playbooks."
+
+---
+
+### 4. Investigate CloudTrail for a compromised access key
+
+**Python snippet:** [Investigate CloudTrail for a Compromised Access Key](#4-investigate-cloudtrail-for-a-compromised-access-key)
+
+Wiz correlates identity risk; **API-level history** for a specific key is still CloudTrail (or Wiz's CloudTrail ingestion if enabled).
+
+**Natural language:**
+
+- IAM identity or access key with anomalous API activity
+- Identities that performed privilege escalation or created access keys
+
+**Security Graph (identity / CIEM):**
+
+```
+FIND identity
+WHERE access_key_id = "ASIA1234567890EXAMPLE"
+```
+
+```
+FIND identity
+WHERE performed_action IN ("CreateAccessKey", "AttachUserPolicy", "PutRolePolicy", "RunInstances")
+AND last_active within 72 hours
+```
+
+**Issues shortcut:** High-risk IAM activity Issues; pivot to CloudTrail event timeline on the identity object if integrated.
+
+**Depth probe:** "For pad-level triage I'd use `lookup_events`; for org-wide hunting I'd use [Athena or Splunk](#1-api-activity-for-a-compromised-access-key) on the trail bucket, or Wiz if CloudTrail is connected to the graph."
+
+---
+
+### 5. CloudTrail logging disabled
+
+**Python snippet:** [Re-Enable CloudTrail Logging](#5-re-enable-cloudtrail-logging)
+
+**Natural language:**
+
+- CloudTrail trails with logging stopped
+- Accounts where CloudTrail is not logging management events
+
+**Security Graph (text-style WQL):**
+
+```
+FIND cloud_account
+WHERE cloudtrail_logging_enabled = false
+```
+
+```
+FIND cloud_resource
+WHERE type = "CloudTrail"
+AND is_logging = false
+```
+
+**Issues shortcut:** Search Issues for "CloudTrail logging disabled" or `StopLogging`-related configuration findings.
+
+**Depth probe:** Pair with GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled` and post-fix CloudTrail query for who called `StopLogging`.
+
+---
+
+### 6. Public S3 buckets
+
+**Python snippet:** [Find Public S3 Buckets](#6-find-public-s3-buckets)
+
+**Natural language:**
+
+- Publicly accessible S3 buckets
+- S3 buckets with public ACL, public policy, or Block Public Access not fully enabled
+
+**Security Graph (text-style WQL):**
+
+```
+FIND datastore
+WHERE type = "S3"
+AND public = true
+```
+
+```
+FIND datastore
+WHERE type = "S3"
+AND public = true
+AND classification IN ("PII", "PCI", "PHI", "Sensitive")
+```
+
+```
+FIND datastore
+WHERE public = true OR encryption = disabled
+```
+
+**Issues shortcut:** Filter Issues for S3 public access / Block Public Access / anonymous ACL or policy findings (matches the Wiz alert in the practice incident).
+
+**Depth probe:** Wiz adds **data classification** and **attack paths** (public bucket + identity that can reach it); boto3 checks BPA, policy, and ACL mechanically.
+
+---
+
+### 7. IAM roles with admin access
+
+**Python snippet:** [Find IAM Roles with Admin Access](#7-find-iam-roles-with-admin-access)
+
+**Natural language:**
+
+- IAM roles with AdministratorAccess or IAMFullAccess
+- Overprivileged service accounts and roles with wildcard Actions
+
+**Security Graph (CIEM / text-style WQL):**
+
+```
+FIND identity
+WHERE type = "IAM_ROLE"
+AND has_policy "AdministratorAccess"
+```
+
+```
+FIND identity
+WHERE effective_permissions contains "*"
+AND type = "IAM_ROLE"
+```
+
+```
+FIND identity
+WHERE attached_policy_arn CONTAINS "AdministratorAccess"
+   OR attached_policy_arn CONTAINS "IAMFullAccess"
+   OR attached_policy_arn CONTAINS "PowerUserAccess"
+```
+
+**Issues shortcut:** CIEM / "Overly permissive role" / "Admin privileges" configuration or Issues views.
+
+**Depth probe:** Wiz CIEM shows **effective permissions** and **unused access**; boto3 only checks attached ARNs and inline `Action: *`.
+
+---
+
+### 8. S3 buckets without HTTPS enforced
+
+**Python snippet:** [Enforce HTTPS on an S3 Bucket](#8-enforce-https-on-an-s3-bucket)
+
+**Natural language:**
+
+- S3 buckets without a deny-insecure-transport bucket policy
+- Datastores allowing HTTP access (`aws:SecureTransport` not enforced)
+
+**Security Graph (text-style WQL):**
+
+```
+FIND datastore
+WHERE type = "S3"
+AND secure_transport_enforced = false
+```
+
+**Issues shortcut:** Configuration finding for missing `aws:SecureTransport` deny or allow-insecure transport.
+
+**Depth probe:** Bucket policy deny is one layer; also mention ALB/CloudFront TLS and SCP `Deny` on unencrypted `PutObject` (see [SCP 4](#scp-4-enforce-s3-security-defaults)).
+
+---
+
+### Practice incident: attack-path query (ties the scenario together)
+
+Use when the Wiz screenshot shows a **public bucket + credential exfil** chain:
+
+**Natural language:**
+
+- Internet-exposed EC2 with access to a public S3 bucket containing sensitive data
+- Attack path from internet to S3 with instance credentials
+
+**Security Graph (text-style WQL):**
+
+```
+FIND virtual_machine
+WHERE exposed_to = "internet"
+AND path_to(datastore WHERE type = "S3" AND public = true)
+```
+
+```
+FIND virtual_machine
+WHERE exposed_to = "internet"
+AND has_secret = true
+AND path_to(datastore WHERE classification IN ("PII", "Sensitive"))
+```
+
+**What this demonstrates:** Wiz value is not replacing boto3; it is **prioritizing** which open SG, IMDSv1 instance, and public bucket matter because they connect on the graph.
+
+---
+
+### JSON graph queries (optional depth)
+
+The Wiz UI and API often represent graph searches as JSON (example from Wiz engineering blog: VMs with unencrypted volumes):
+
+```json
+{
+  "type": ["VIRTUAL_MACHINE"],
+  "relationships": [{
+    "type": [{"type": "USES"}],
+    "with": {
+      "type": ["VOLUME"],
+      "where": { "encrypted": { "EQUALS": false } }
+    }
+  }]
+}
+```
+
+If asked how Wiz works under the hood: natural language and text queries compile to graph JSON over entities (`VIRTUAL_MACHINE`, `DATASTORE`, `IDENTITY`, etc.) and relationships (`USES`, `CAN_ACCESS`, `EXPOSED_TO`). Exact schema is tenant-specific; **Ask AI** and the query builder are the source of truth.
+
+---
+
+### Quick reference: boto3 vs Wiz
+
+| Audit | boto3 (IR / CoderPad) | Wiz (steady-state) |
+|-------|------------------------|---------------------|
+| Open SGs | `describe_security_groups` | Graph: open CIDR rules; Issues |
+| IMDSv1 | `describe_instances` + `MetadataOptions` | Config finding + attack path |
+| Quarantine | snapshot, `modify_instance_attribute`, tags | Findings + blast radius on graph |
+| Access key activity | `lookup_events` / Athena | Identity risk + detections |
+| Trail stopped | `get_trail_status`, `start_logging` | Config finding + Stealth correlation |
+| Public S3 | BPA + policy + ACL APIs | `FIND datastore ... public = true` |
+| Admin roles | `list_roles` + policy APIs | CIEM / overprivileged identity |
+| HTTPS on S3 | merge bucket policy | Config finding + policy gap |
+
+CloudTrail and VPC Flow Log hunts: [Log Analysis: Athena & Splunk](#log-analysis-athena--splunk).
+
+---
+
+## Log Analysis: Athena & Splunk
+
+CloudTrail answers **who did what API call, when, and from where**. VPC Flow Logs answer **which IPs talked to which ENIs on which ports** (metadata only; no payload). In the practice incident, both tie together: CloudTrail shows `GetObject` and `StopLogging`; flow logs show the external IP using stolen credentials or calling out to C2.
+
+**Investigation ladder:**
+
+1. **Fast triage:** `lookup_events` (boto3) or SIEM alert pivot
+2. **Deep hunt:** Athena (org trail in S3) or Splunk over forwarded logs
+3. **Network corroboration:** VPC Flow Logs in Athena or Splunk (`vpc_flow_logs` index)
+
+Replace placeholders before running: `ASIA...`, `10.0.1.50`, `eni-...`, date partitions, index names.
+
+### Prerequisites (say out loud if asked)
+
+| Source | Athena | Splunk |
+|--------|--------|--------|
+| CloudTrail | Table over S3 delivery bucket (e.g. `cloudtrail_logs`), or **CloudTrail Lake** event data store | Index/sourcetype from Splunk Add-on for AWS (e.g. `index=aws_ct sourcetype=aws:cloudtrail`) |
+| VPC Flow Logs | Table over flow log S3 prefix (e.g. `vpc_flow_logs`) | Index (e.g. `index=aws_vpcflow sourcetype=aws:vpcflow`) |
+| Partitions | `year` / `month` / `day` on CloudTrail; `date` on flow logs | `earliest` / `latest` in search time range |
+
+**CloudTrail key fields:** `eventname`, `eventtime`, `sourceipaddress`, `useridentity.accesskeyid`, `useridentity.arn`, `useridentity.type`, `requestparameters`, `errorcode`
+
+**VPC Flow Log key fields:** `srcaddr`, `dstaddr`, `srcport`, `dstport`, `protocol`, `action` (`ACCEPT` / `REJECT`), `interface_id`, `bytes`
+
+**Framing line:** "`lookup_events` is enough to orient; Athena or Splunk is how the team proves scope, finds log gaps, and builds the timeline for leadership."
+
+---
+
+### 1. API activity for a compromised access key
+
+**Maps to:** [Investigate CloudTrail for a Compromised Access Key](#4-investigate-cloudtrail-for-a-compromised-access-key), practice incident credential exfil.
+
+**Athena (CloudTrail on S3):**
+
+```sql
+-- API call summary for a session or long-term key (last 72 hours)
+SELECT
+  eventname,
+  COUNT(*) AS event_count,
+  MIN(eventtime) AS first_seen,
+  MAX(eventtime) AS last_seen
+FROM cloudtrail_logs
+WHERE useridentity.accesskeyid = 'ASIA1234567890EXAMPLE'
+  AND eventtime >= current_timestamp - interval '72' hour
+  AND year = '2026' AND month = '05'  -- align to partition columns
+GROUP BY eventname
+ORDER BY event_count DESC;
+```
+
+```sql
+-- Detailed timeline with source IP and user agent
+SELECT
+  eventtime,
+  eventname,
+  sourceipaddress,
+  useridentity.arn,
+  useridentity.type,
+  useragent,
+  errorcode
+FROM cloudtrail_logs
+WHERE useridentity.accesskeyid = 'ASIA1234567890EXAMPLE'
+  AND eventtime >= current_timestamp - interval '72' hour
+ORDER BY eventtime ASC;
+```
+
+**Splunk:**
+
+```spl
+index=aws_ct UserIdentity.AccessKeyId="ASIA1234567890EXAMPLE" earliest=-72h@h
+| stats count as event_count earliest(_time) as first_seen latest(_time) as last_seen by EventName
+| sort - event_count
+```
+
+```spl
+index=aws_ct UserIdentity.AccessKeyId="ASIA1234567890EXAMPLE" earliest=-72h@h
+| table _time EventName SourceIpAddress UserIdentity.Arn UserAgent ErrorCode
+| sort _time
+```
+
+**Depth probe:** Session keys (`ASIA`) include `useridentity.sessioncontext`; long-term keys (`AKIA`) map to IAM users. Data events (`GetObject`) require data event logging or Lake; management trail alone may miss object reads.
+
+---
+
+### 2. High-risk / persistence API calls
+
+**Maps to:** risky set in Python snippet; IAM persistence in practice incident.
+
+**Athena:**
+
+```sql
+SELECT
+  eventtime,
+  eventname,
+  useridentity.arn,
+  sourceipaddress,
+  requestparameters
+FROM cloudtrail_logs
+WHERE useridentity.accesskeyid = 'ASIA1234567890EXAMPLE'
+  AND eventname IN (
+    'CreateAccessKey', 'AttachUserPolicy', 'AttachRolePolicy',
+    'PutUserPolicy', 'PutRolePolicy', 'CreatePolicyVersion',
+    'RunInstances', 'CreateLoginProfile', 'UpdateAssumeRolePolicy',
+    'AddUserToGroup', 'CreateUser',
+    'StopLogging', 'DeleteTrail', 'UpdateTrail', 'PutBucketPolicy'
+  )
+  AND eventtime >= current_timestamp - interval '72' hour
+ORDER BY eventtime;
+```
+
+**Splunk:**
+
+```spl
+index=aws_ct UserIdentity.AccessKeyId="ASIA1234567890EXAMPLE" earliest=-72h@h
+  (EventName=CreateAccessKey OR EventName=AttachUserPolicy OR EventName=AttachRolePolicy
+   OR EventName=PutUserPolicy OR EventName=PutRolePolicy OR EventName=CreatePolicyVersion
+   OR EventName=RunInstances OR EventName=CreateLoginProfile OR EventName=UpdateAssumeRolePolicy
+   OR EventName=AddUserToGroup OR EventName=CreateUser
+   OR EventName=StopLogging OR EventName=DeleteTrail OR EventName=UpdateTrail OR EventName=PutBucketPolicy)
+| table _time EventName UserIdentity.Arn SourceIpAddress requestParameters
+| sort _time
+```
+
+---
+
+### 3. S3 data exfiltration (`GetObject` / `ListBucket`)
+
+**Maps to:** practice incident S3 read access via compromised role.
+
+**Athena (requires S3 data events in trail or Lake):**
+
+```sql
+SELECT
+  eventtime,
+  eventname,
+  useridentity.accesskeyid,
+  sourceipaddress,
+  json_extract_scalar(requestparameters, '$.bucketName') AS bucket_name,
+  json_extract_scalar(requestparameters, '$.key') AS object_key,
+  errorcode
+FROM cloudtrail_logs
+WHERE eventsource = 's3.amazonaws.com'
+  AND eventname IN ('GetObject', 'ListBucket', 'ListObjectsV2')
+  AND useridentity.accesskeyid = 'ASIA1234567890EXAMPLE'
+  AND eventtime >= current_timestamp - interval '72' hour
+ORDER BY eventtime;
+```
+
+**Splunk:**
+
+```spl
+index=aws_ct eventSource=s3.amazonaws.com
+  (EventName=GetObject OR EventName=ListBucket OR EventName=ListObjectsV2)
+  UserIdentity.AccessKeyId="ASIA1234567890EXAMPLE" earliest=-72h@h
+| eval bucket=coalesce(requestParameters.bucketName, requestParameters.bucket)
+| table _time EventName SourceIpAddress bucket requestParameters.key
+| sort _time
+```
+
+**Depth probe:** If zero rows, state that data events were likely not enabled; recommend enabling on sensitive buckets and re-running for future incidents.
+
+---
+
+### 4. CloudTrail tampering (`StopLogging` / `DeleteTrail`)
+
+**Maps to:** [Re-Enable CloudTrail Logging](#5-re-enable-cloudtrail-logging), GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled`.
+
+**Athena:**
+
+```sql
+-- Who disabled logging and when (org-wide hunt)
+SELECT
+  eventtime,
+  eventname,
+  useridentity.arn,
+  useridentity.type,
+  sourceipaddress,
+  requestparameters
+FROM cloudtrail_logs
+WHERE eventname IN ('StopLogging', 'DeleteTrail', 'UpdateTrail')
+  AND eventsource = 'cloudtrail.amazonaws.com'
+  AND eventtime >= current_timestamp - interval '7' day
+ORDER BY eventtime DESC;
+```
+
+```sql
+-- Assess logging gap: last event before StopLogging vs first after StartLogging
+SELECT eventname, eventtime, useridentity.arn
+FROM cloudtrail_logs
+WHERE requestparameters LIKE '%trail-name%'
+  AND eventname IN ('StopLogging', 'StartLogging')
+  AND eventtime >= current_timestamp - interval '7' day
+ORDER BY eventtime;
+```
+
+**Splunk:**
+
+```spl
+index=aws_ct EventName=StopLogging OR EventName=DeleteTrail OR EventName=UpdateTrail earliest=-7d@d
+| table _time EventName UserIdentity.Arn SourceIpAddress requestParameters
+| sort - _time
+```
+
+**Depth probe:** Cross-check `get_trail_status` in the account; logs during the disabled window are permanently missing from that trail.
+
+---
+
+### 5. S3 bucket made public (policy / ACL / BPA changes)
+
+**Maps to:** [Find Public S3 Buckets](#6-find-public-s3-buckets), Wiz public bucket alert.
+
+**Athena:**
+
+```sql
+SELECT
+  eventtime,
+  eventname,
+  useridentity.arn,
+  sourceipaddress,
+  requestparameters
+FROM cloudtrail_logs
+WHERE eventsource = 's3.amazonaws.com'
+  AND eventname IN (
+    'PutBucketPolicy', 'PutBucketAcl', 'PutPublicAccessBlock',
+    'DeletePublicAccessBlock', 'PutBucketPublicAccessBlock'
+  )
+  AND eventtime >= current_timestamp - interval '7' day
+ORDER BY eventtime DESC;
+```
+
+```sql
+-- Narrow to a specific bucket from the Wiz finding
+SELECT eventtime, eventname, useridentity.arn, sourceipaddress, requestparameters
+FROM cloudtrail_logs
+WHERE eventsource = 's3.amazonaws.com'
+  AND requestparameters LIKE '%sensitive-analytics-bucket%'
+  AND eventtime >= current_timestamp - interval '7' day
+ORDER BY eventtime;
+```
+
+**Splunk:**
+
+```spl
+index=aws_ct eventSource=s3.amazonaws.com
+  (EventName=PutBucketPolicy OR EventName=PutBucketAcl OR EventName=PutPublicAccessBlock
+   OR EventName=DeletePublicAccessBlock OR EventName=PutBucketPublicAccessBlock) earliest=-7d@d
+| table _time EventName UserIdentity.Arn SourceIpAddress requestParameters
+| sort - _time
+```
+
+---
+
+### 6. IAM admin attachment / role changes
+
+**Maps to:** [Find IAM Roles with Admin Access](#7-find-iam-roles-with-admin-access).
+
+**Athena:**
+
+```sql
+SELECT
+  eventtime,
+  eventname,
+  useridentity.arn,
+  sourceipaddress,
+  requestparameters
+FROM cloudtrail_logs
+WHERE eventsource = 'iam.amazonaws.com'
+  AND eventname IN (
+    'AttachRolePolicy', 'AttachUserPolicy', 'PutRolePolicy',
+    'CreatePolicyVersion', 'AddUserToGroup', 'UpdateAssumeRolePolicy'
+  )
+  AND eventtime >= current_timestamp - interval '7' day
+ORDER BY eventtime DESC;
+```
+
+**Splunk:**
+
+```spl
+index=aws_ct eventSource=iam.amazonaws.com earliest=-7d@d
+  (EventName=AttachRolePolicy OR EventName=AttachUserPolicy OR EventName=PutRolePolicy
+   OR EventName=CreatePolicyVersion OR EventName=AddUserToGroup)
+| search requestParameters.policyArn="*AdministratorAccess*"
+   OR requestParameters.policyArn="*IAMFullAccess*"
+| table _time EventName UserIdentity.Arn SourceIpAddress requestParameters
+```
+
+---
+
+### 7. VPC Flow Logs: external IP to a compromised instance
+
+**Maps to:** GuardDuty credential exfil "outside AWS"; correlate stolen creds source IP with instance ENI.
+
+**Athena:**
+
+```sql
+-- Inbound ACCEPT to a known instance private IP (replace IP and date partition)
+SELECT
+  start,
+  srcaddr,
+  dstaddr,
+  srcport,
+  dstport,
+  protocol,
+  bytes,
+  interface_id,
+  action
+FROM vpc_flow_logs
+WHERE dstaddr = '10.0.1.50'
+  AND action = 'ACCEPT'
+  AND srcaddr NOT LIKE '10.%'           -- exclude RFC1918 source (adjust to VPC CIDR)
+  AND date >= date '2026-05-23'
+ORDER BY start;
+```
+
+```sql
+-- Top talkers to the instance ENI in the incident window
+SELECT
+  srcaddr,
+  dstport,
+  SUM(bytes) AS total_bytes,
+  COUNT(*) AS flow_count
+FROM vpc_flow_logs
+WHERE interface_id = 'eni-0abc123def456'
+  AND action = 'ACCEPT'
+  AND date >= date '2026-05-23'
+GROUP BY srcaddr, dstport
+ORDER BY total_bytes DESC
+LIMIT 50;
+```
+
+**Splunk:**
+
+```spl
+index=aws_vpcflow dest_ip=10.0.1.50 action=ACCEPT earliest=-72h@h
+  NOT (src_ip=10.0.0.0/8 OR src_ip=172.16.0.0/12 OR src_ip=192.168.0.0/16)
+| stats sum(bytes) as total_bytes count by src_ip dest_port protocol
+| sort - total_bytes
+```
+
+```spl
+index=aws_vpcflow interface_id=eni-0abc123def456 action=ACCEPT earliest=-72h@h
+| stats sum(bytes) as total_bytes count by src_ip dest_port
+| sort - total_bytes
+```
+
+**Depth probe:** Flow logs show L3/L4 only; TLS SNI and HTTP host are not visible. For application-layer SSRF, pair with ALB/WAF logs and CloudTrail `AssumeRole` / instance role usage.
+
+---
+
+### 8. VPC Flow Logs: outbound C2 or data exfil from compromised instance
+
+**Maps to:** Section 6 outbound restriction; Trojan/C2 GuardDuty finding types.
+
+**Athena:**
+
+```sql
+-- Outbound ACCEPT from instance private IP to internet (non-RFC1918 dest)
+SELECT
+  start,
+  srcaddr,
+  dstaddr,
+  srcport,
+  dstport,
+  protocol,
+  bytes,
+  interface_id
+FROM vpc_flow_logs
+WHERE srcaddr = '10.0.1.50'
+  AND action = 'ACCEPT'
+  AND dstaddr NOT LIKE '10.%'
+  AND dstaddr NOT LIKE '172.16.%'
+  AND dstaddr NOT LIKE '192.168.%'
+  AND date >= date '2026-05-23'
+ORDER BY bytes DESC;
+```
+
+```sql
+-- Heavy egress on 443 (possible C2 over HTTPS)
+SELECT
+  dstaddr,
+  SUM(bytes) AS total_bytes,
+  COUNT(*) AS connections
+FROM vpc_flow_logs
+WHERE srcaddr = '10.0.1.50'
+  AND dstport = 443
+  AND action = 'ACCEPT'
+  AND date >= date '2026-05-23'
+GROUP BY dstaddr
+ORDER BY total_bytes DESC
+LIMIT 20;
+```
+
+**Splunk:**
+
+```spl
+index=aws_vpcflow src_ip=10.0.1.50 action=ACCEPT earliest=-72h@h
+  NOT (dest_ip=10.0.0.0/8 OR dest_ip=172.16.0.0/12 OR dest_ip=192.168.0.0/16)
+| stats sum(bytes) as total_bytes count by dest_ip dest_port protocol
+| sort - total_bytes
+```
+
+---
+
+### 9. VPC Flow Logs: inbound recon (port probes)
+
+**Maps to:** `Recon:EC2/PortProbeUnprotectedPort`, open SG on port 80.
+
+**Athena:**
+
+```sql
+-- REJECT inbound to instance (scanner hitting closed or filtered ports)
+SELECT
+  srcaddr,
+  dstport,
+  COUNT(*) AS reject_count
+FROM vpc_flow_logs
+WHERE dstaddr = '10.0.1.50'
+  AND action = 'REJECT'
+  AND date >= date '2026-05-23'
+GROUP BY srcaddr, dstport
+ORDER BY reject_count DESC
+LIMIT 50;
+```
+
+```sql
+-- ACCEPT inbound on port 80 from internet (matches open SG scenario)
+SELECT
+  start,
+  srcaddr,
+  dstport,
+  bytes
+FROM vpc_flow_logs
+WHERE dstaddr = '10.0.1.50'
+  AND dstport = 80
+  AND action = 'ACCEPT'
+  AND srcaddr NOT LIKE '10.%'
+  AND date >= date '2026-05-23'
+ORDER BY start;
+```
+
+**Splunk:**
+
+```spl
+index=aws_vpcflow dest_ip=10.0.1.50 action=REJECT earliest=-24h@h
+| stats count by src_ip dest_port
+| sort - count
+```
+
+---
+
+### 10. Practice incident: join CloudTrail identity to VPC source IP
+
+Narrate the correlation; no single query joins both sources without a common key (IP, time, ENI).
+
+**Step A (CloudTrail):** external IP using the stolen key
+
+```sql
+SELECT DISTINCT sourceipaddress
+FROM cloudtrail_logs
+WHERE useridentity.accesskeyid = 'ASIA1234567890EXAMPLE'
+  AND eventtime >= current_timestamp - interval '72' hour;
+```
+
+**Step B (VPC Flow Logs):** confirm that IP reached the instance
+
+```sql
+SELECT start, srcaddr, dstaddr, dstport, bytes, action
+FROM vpc_flow_logs
+WHERE srcaddr = '203.0.113.42'    -- IP from step A
+  AND dstaddr = '10.0.1.50'
+  AND action = 'ACCEPT'
+  AND date >= date '2026-05-23'
+ORDER BY start;
+```
+
+**Splunk (transaction across indexes):**
+
+```spl
+index=aws_ct UserIdentity.AccessKeyId="ASIA1234567890EXAMPLE" earliest=-72h@h
+| stats values(SourceIpAddress) as attacker_ips
+| mvexpand attacker_ips
+| join attacker_ips
+    [ search index=aws_vpcflow earliest=-72h@h action=ACCEPT
+      | eval attacker_ips=src_ip
+      | stats count sum(bytes) as total_bytes by src_ip dest_ip dest_port ]
+```
+
+**What this demonstrates:** CloudTrail proves **API abuse**; flow logs prove **network path**. Together they support the story: SSRF on port 80 → creds from IMDS → API calls from attacker IP → optional outbound C2.
+
+---
+
+### CloudTrail Lake (optional mention)
+
+If the org uses **CloudTrail Lake** instead of Athena on S3:
+
+```sql
+-- Lake SQL (event data store); table name is the EDS id
+SELECT eventTime, eventName, sourceIpAddress, userIdentity.accessKeyId
+FROM 01234567-89ab-cdef-0123-456789abcdef
+WHERE userIdentity.accessKeyId = 'ASIA1234567890EXAMPLE'
+  AND eventTime > '2026-05-23 00:00:00'
+ORDER BY eventTime ASC;
+```
+
+Lake avoids manual partition columns and supports org-wide stores; syntax is close enough to Athena for interview discussion.
+
+---
+
+### Quick reference: investigation tool pick
+
+| Question | First look | Deep hunt |
+|----------|------------|-----------|
+| What APIs did this key call? | `lookup_events` | Athena / Splunk on CloudTrail |
+| Did they read S3 objects? | Same (if data events on) | Athena `GetObject` filter |
+| Who stopped CloudTrail? | GuardDuty Stealth finding | `StopLogging` in Athena / Splunk |
+| Who made the bucket public? | Wiz Issue | `PutBucketPolicy` / BPA APIs |
+| Did attacker IP hit the instance? | GuardDuty source IP | VPC Flow Logs `srcaddr` → `dstaddr` |
+| Is the instance calling out? | Runtime / GD C2 finding | Flow logs egress from `srcaddr` |
+| Port scan / open port 80? | GD Recon finding | Flow logs `REJECT` / `ACCEPT` on :80 |
 
 ---
 
@@ -1000,10 +1849,10 @@ The scenario is *"a similar company to NOA, with multiple departments using AWS 
 
 ### Questions to Ask Them
 
-- "How many AWS accounts are you managing, and do you use a centralized security account for GuardDuty and Security Hub?"
+- "How many AWS accounts are you managing, and do you use a centralized security account for GuardDuty and Security Hub? What does your Org/OU structure look like?"
 - "What does your IR runbook process look like today: is it documented, or are you building it out?"
 - "How do you handle security for game launch events or holiday seasons when infrastructure scales rapidly?"
-- "Is there an on-call rotation? What does that look like? What are the most common pageable events?"
+- "Is there an on-call rotation? What does that look like? What are the most common pageable events? What is the escalation path?"
 - "What's the split between proactive engineering (hardening, automation) and reactive work (incidents, tickets) in this role?"
 - "How does the NOA security team coordinate with the global team in Japan? Are there opportunities for in-person collaboration there?"
 - "Given the small size of your team, how does that impact how you support each other?"
