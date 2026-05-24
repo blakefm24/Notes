@@ -177,7 +177,7 @@ Based on the recruiter's description, below is a plausible incident walkthrough 
 
 ## CoderPad: Python Snippets
 
-The CoderPad is for demonstrating how to automate a response or audit, not a LeetCode test. Write clean, readable code. The focus is knowing the right boto3 calls and structuring a script logically. Keep these patterns in mind; adapt them to whatever the scenario asks for.
+The CoderPad is for demonstrating how to automate a response or audit, not a LeetCode test. Write clean, readable code. The focus is knowing the right boto3 calls and structuring a script logically. Keep these patterns in mind; adapt them to whatever the scenario asks for. Each snippet includes a **How it works** footnote below the code; use these to explain the approach, the key API calls, and any caveats the interviewer might probe on.
 
 ### 1. Find Security Groups Open to the Internet
 
@@ -237,6 +237,8 @@ def find_open_security_groups():
 find_open_security_groups()
 ```
 
+**How it works:** The script paginates through every security group in the region via `describe_security_groups`, then inspects both inbound (`IpPermissions`) and outbound (`IpPermissionsEgress`) rule sets. A helper function scans each rule's IPv4 and IPv6 CIDR blocks for `0.0.0.0/0` or `::/0`; when found, the finding records the group ID, direction, port, protocol, and the open CIDRs. Pagination handles accounts with large SG inventories; checking both directions catches outbound exfil paths, not just inbound exposure. In the interview, note that org-wide coverage requires looping regions (or using Security Hub / Config aggregators).
+
 ### 2. Find EC2 Instances Still on IMDSv1
 
 **Likely prompt:** After discovering SSRF or credential theft via metadata. "How would you audit the rest of the fleet?"
@@ -286,6 +288,8 @@ def find_imdsv1_instances():
 
 find_imdsv1_instances()
 ```
+
+**How it works:** The script walks the fleet with paginated `describe_instances`, skipping instances in terminal states. For each running instance, it reads `MetadataOptions` and flags any instance where `HttpTokens` is not set to `required` (meaning IMDSv1 is still permitted). Instances with `HttpEndpoint` disabled are excluded because the metadata service is unreachable and not exploitable via SSRF. The output includes the hop limit (`HttpPutResponseHopLimit`), which matters in container and SSRF scenarios where a hop limit of 1 can block lateral metadata access. Remediation is enforced via launch templates or an account-level default requiring IMDSv2.
 
 ### 3. Quarantine a Compromised Instance
 
@@ -356,6 +360,8 @@ def quarantine_instance(instance_id, quarantine_sg_id):
 quarantine_instance('i-0abc123def456', 'sg-quarantine123')
 ```
 
+**How it works:** Containment follows a three-step IR playbook: preserve evidence, isolate network, document state. First, `describe_instances` retrieves the instance's current security groups and EBS volume mappings; `create_snapshot` captures each EBS volume with IR tags before any network changes (instance store volumes are not captured... call that out in the interview). Second, `modify_instance_attribute` replaces all attached security groups with a pre-provisioned quarantine SG that denies all inbound and outbound traffic. Third, `create_tags` marks the instance with quarantine metadata and preserves the original SG list for rollback. The quarantine SG must exist before running the script; it is a deny-all group created out of band.
+
 ### 4. Investigate CloudTrail for a Compromised Access Key
 
 **Likely prompt:** "We have the access key ID from the GuardDuty finding. What did the attacker do with it?"
@@ -418,6 +424,8 @@ def investigate_access_key(access_key_id, hours_back=72):
 investigate_access_key('ASIA1234567890EXAMPLE')
 ```
 
+**How it works:** Triage starts with `lookup_events`, filtered by `AccessKeyId` and a configurable time window (default 72 hours). Results are paginated and aggregated by `EventName` to produce a quick picture of attacker activity. A predefined set of high-risk API calls (privilege escalation, persistence, log tampering) is intersected with the observed calls to surface immediate threats. `lookup_events` is suitable for initial triage but is subject to API limits and retention caps (~90 days); for a full investigation, pivot to CloudTrail Lake or Athena queries against the org trail in S3. GuardDuty credential exfil findings often surface session keys (`ASIA...`) rather than long-term keys (`AKIA...`); both work as lookup attributes.
+
 ### 5. Re-Enable CloudTrail Logging
 
 **Likely prompt:** GuardDuty fires `Stealth:IAMUser/CloudTrailLoggingDisabled`: an attacker (or misconfiguration) stopped logging to cover tracks. "How would you find and fix all disabled trails?"
@@ -469,6 +477,8 @@ def reenable_cloudtrail_logging():
 
 reenable_cloudtrail_logging()
 ```
+
+**How it works:** The script lists all trails in the region with `describe_trails`, then checks each trail's logging state via `get_trail_status` (note: the API expects the trail name, not the ARN). Trails where `IsLogging` is false are re-enabled with `start_logging`, and a second status check confirms the fix. Stopped trails are a common attacker tactic after initial access (GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled`); re-enabling logging is the immediate remediation, but the investigation is not done. Post-fix steps include querying CloudTrail for `StopLogging` events to identify who disabled logging, verifying log file validation (digest files) is enabled, confirming the delivery S3 bucket is intact, and assessing log gaps during the disabled window via Athena or CloudTrail Lake.
 
 ### 6. Find Public S3 Buckets
 
@@ -558,6 +568,8 @@ def find_public_buckets():
 find_public_buckets()
 ```
 
+**How it works:** Each bucket is evaluated against three independent exposure vectors. First, Block Public Access (BPA): all four settings (`BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets`) must be true; a missing BPA configuration is itself a finding. Second, the bucket policy: statements with `Effect: Allow` and a public principal (`*` or `Principal: *`) are flagged. Third, the bucket ACL: grants to `AllUsers` (anonymous) or `AuthenticatedUsers` (any AWS account) are flagged. A regional S3 client is created per bucket because `list_buckets` is global but policy and ACL APIs are regional. `ClientError` handling distinguishes "no policy" (expected) from permission errors. Public exposure can exist at any layer even when others are locked down; checking all three reflects defense-in-depth understanding.
+
 ### 7. Find IAM Roles with Admin Access
 
 **Likely prompt:** "What else in this account might be over-permissioned?"
@@ -622,6 +634,8 @@ def find_overprivileged_roles():
 find_overprivileged_roles()
 ```
 
+**How it works:** The script paginates through all IAM roles and checks two permission sources. Attached managed policies are compared against a set of known high-privilege AWS managed policy ARNs (`AdministratorAccess`, `IAMFullAccess`, `PowerUserAccess`). Inline policies are fetched individually and parsed for `Action: *` or `Action: ["...", "*"]` in Allow statements, which grant unrestricted access within the policy's resource scope. A helper normalizes policy documents where `Statement` may be a single object or a list (common in both IAM and S3 policy formats). This audit identifies lateral movement targets after compromise; in the interview, pair findings with remediation paths (scoped custom policies, permission boundaries, SCPs to cap maximum permissions).
+
 ### 8. Enforce HTTPS on an S3 Bucket
 
 **Likely prompt:** "How would you ensure this bucket only accepts encrypted connections?"
@@ -673,6 +687,8 @@ def enforce_https(bucket_name):
 
 enforce_https('my-sensitive-bucket')
 ```
+
+**How it works:** The script adds a bucket policy `Deny` statement conditioned on `aws:SecureTransport: false`, which blocks any request not made over TLS regardless of what Allow statements exist elsewhere in the policy (explicit deny wins in AWS policy evaluation). The existing bucket policy is fetched and parsed first; if no policy exists, a new document is created rather than overwriting unrelated configuration. The check for an existing `DenyInsecureTransport` Sid makes the operation idempotent. The deny applies to both the bucket and object ARNs (`bucket/*`). In the interview, note this is a data-at-rest/in-transit control at the bucket layer; it complements (but does not replace) encryption settings and CloudFront/ALB HTTPS termination upstream.
 
 ---
 
