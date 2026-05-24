@@ -196,13 +196,13 @@ INTERNET_CIDRS_V6 = ('::/0',)
 def _open_internet_cidrs(rule):
     """Return any internet-wide CIDRs on a single SG rule."""
     open_v4 = [
-        r['CidrIp'] for r in rule.get('IpRanges', [])
-        if r.get('CidrIp') in INTERNET_CIDRS_V4
-    ]
+        r['CidrIp'] for r in rule['IpRanges']
+        if r['CidrIp'] in INTERNET_CIDRS_V4
+    ] if 'IpRanges' in rule else []
     open_v6 = [
-        r['CidrIpv6'] for r in rule.get('Ipv6Ranges', [])
-        if r.get('CidrIpv6') in INTERNET_CIDRS_V6
-    ]
+        r['CidrIpv6'] for r in rule['Ipv6Ranges']
+        if r['CidrIpv6'] in INTERNET_CIDRS_V6
+    ] if 'Ipv6Ranges' in rule else []
     return open_v4 + open_v6
 
 
@@ -214,8 +214,8 @@ def find_open_security_groups():
         for sg in page['SecurityGroups']:
             # Check inbound (IpPermissions) and outbound (IpPermissionsEgress)
             for direction, rules in (
-                ('inbound', sg.get('IpPermissions', [])),
-                ('outbound', sg.get('IpPermissionsEgress', [])),
+                ('inbound', sg['IpPermissions']),
+                ('outbound', sg['IpPermissionsEgress']),
             ):
                 for rule in rules:
                     open_cidrs = _open_internet_cidrs(rule)
@@ -224,8 +224,8 @@ def find_open_security_groups():
                             'sg_id': sg['GroupId'],
                             'sg_name': sg['GroupName'],
                             'direction': direction,
-                            'port': rule.get('FromPort', 'all'),
-                            'protocol': rule.get('IpProtocol', 'all'),
+                            'port': rule['FromPort'] if 'FromPort' in rule else 'all',
+                            'protocol': rule['IpProtocol'] if 'IpProtocol' in rule else 'all',
                             'open_to': open_cidrs,
                         })
     for f in findings:
@@ -258,22 +258,22 @@ def find_imdsv1_instances():
             for inst in res['Instances']:
                 if inst['State']['Name'] in TERMINAL_STATES:
                     continue
-                md = inst.get('MetadataOptions', {})
+                md = inst['MetadataOptions']
                 # IMDS disabled; not reachable, not in scope for SSRF cred theft
-                if md.get('HttpEndpoint') == 'disabled':
+                if md['HttpEndpoint'] == 'disabled':
                     continue
-                if md.get('HttpTokens') != 'required':
+                if md['HttpTokens'] != 'required':
+                    tags = inst['Tags'] if 'Tags' in inst else []
                     name = next(
-                        (t['Value'] for t in inst.get('Tags', [])
-                         if t['Key'] == 'Name'),
+                        (t['Value'] for t in tags if t['Key'] == 'Name'),
                         'unnamed',
                     )
                     entry = {
                         'instance_id': inst['InstanceId'],
                         'name': name,
-                        'http_tokens': md.get('HttpTokens', 'unknown'),
-                        'http_endpoint': md.get('HttpEndpoint', 'unknown'),
-                        'hop_limit': md.get('HttpPutResponseHopLimit'),
+                        'http_tokens': md['HttpTokens'] if 'HttpTokens' in md else 'unknown',
+                        'http_endpoint': md['HttpEndpoint'] if 'HttpEndpoint' in md else 'unknown',
+                        'hop_limit': md['HttpPutResponseHopLimit'] if 'HttpPutResponseHopLimit' in md else None,
                         'state': inst['State']['Name'],
                     }
                     vulnerable.append(entry)
@@ -316,7 +316,7 @@ def quarantine_instance(instance_id, quarantine_sg_id):
 
     # STEP 1: Snapshot EBS volumes before isolation (common IR playbook).
     # Instance store volumes are not captured; note that in the interview.
-    for bdm in instance.get('BlockDeviceMappings', []):
+    for bdm in instance['BlockDeviceMappings']:
         if 'Ebs' not in bdm:
             continue
         vol_id = bdm['Ebs']['VolumeId']
@@ -390,8 +390,10 @@ def investigate_access_key(access_key_id, hours_back=72):
 
     api_calls = {}
     for e in events:
-        name = e.get('EventName', 'unknown')
-        api_calls[name] = api_calls.get(name, 0) + 1
+        name = e['EventName']
+        if name not in api_calls:
+            api_calls[name] = 0
+        api_calls[name] += 1
 
     print(f"Found {len(events)} events for key {access_key_id}")
     print("(If truncated, query Athena/Lake for complete history.)\n")
@@ -434,16 +436,16 @@ def reenable_cloudtrail_logging():
     for trail in trails:
         trail_name = trail['Name']
         trail_arn = trail['TrailARN']
-        home_region = trail.get('HomeRegion', 'unknown')
+        home_region = trail['HomeRegion'] if 'HomeRegion' in trail else 'unknown'
         # API expects trail name, not ARN
         status = ct.get_trail_status(Name=trail_name)
-        if not status.get('IsLogging', False):
+        if not status['IsLogging']:
             print(f"[STOPPED] {trail_name} ({trail_arn}) region={home_region}")
-            stop_time = status.get('LatestDeliveryTime', 'unknown')
+            stop_time = status['LatestDeliveryTime'] if 'LatestDeliveryTime' in status else 'unknown'
             print(f"  Last delivery: {stop_time}")
             ct.start_logging(Name=trail_name)
             verify = ct.get_trail_status(Name=trail_name)
-            if verify.get('IsLogging'):
+            if verify['IsLogging']:
                 print("  ✓ Logging re-enabled and confirmed")
                 fixed.append({
                     'trail': trail_name,
@@ -481,12 +483,13 @@ s3_global = boto3.client('s3')
 
 
 def bucket_region(bucket_name):
-    loc = s3_global.get_bucket_location(Bucket=bucket_name).get('LocationConstraint')
+    resp = s3_global.get_bucket_location(Bucket=bucket_name)
+    loc = resp['LocationConstraint'] if 'LocationConstraint' in resp else None
     return loc or 'us-east-1'
 
 
 def iter_policy_statements(policy):
-    stmt = policy.get('Statement', [])
+    stmt = policy['Statement']
     return [stmt] if isinstance(stmt, dict) else stmt
 
 
@@ -494,7 +497,7 @@ def is_public_principal(principal):
     if principal == '*':
         return True
     if isinstance(principal, dict):
-        aws = principal.get('AWS')
+        aws = principal['AWS'] if 'AWS' in principal else None
         if aws == '*':
             return True
         if isinstance(aws, list) and '*' in aws:
@@ -512,10 +515,10 @@ def find_public_buckets():
         try:
             config = s3.get_public_access_block(Bucket=name)['PublicAccessBlockConfiguration']
             if not all([
-                config.get('BlockPublicAcls', False),
-                config.get('IgnorePublicAcls', False),
-                config.get('BlockPublicPolicy', False),
-                config.get('RestrictPublicBuckets', False),
+                config['BlockPublicAcls'],
+                config['IgnorePublicAcls'],
+                config['BlockPublicPolicy'],
+                config['RestrictPublicBuckets'],
             ]):
                 issues.append('Block Public Access not fully enabled')
         except ClientError as err:
@@ -527,15 +530,16 @@ def find_public_buckets():
         try:
             policy = json.loads(s3.get_bucket_policy(Bucket=name)['Policy'])
             for stmt in iter_policy_statements(policy):
-                if stmt.get('Effect') == 'Allow' and is_public_principal(stmt.get('Principal')):
-                    issues.append(f"Policy allows public access: {stmt.get('Action')}")
+                if stmt['Effect'] == 'Allow' and is_public_principal(stmt['Principal']):
+                    issues.append(f"Policy allows public access: {stmt['Action']}")
         except ClientError as err:
             if err.response['Error']['Code'] != 'NoSuchBucketPolicy':
                 issues.append(f'Policy read error: {err.response["Error"]["Code"]}')
         try:
             acl = s3.get_bucket_acl(Bucket=name)
-            for grant in acl.get('Grants', []):
-                uri = grant.get('Grantee', {}).get('URI', '')
+            for grant in acl['Grants']:
+                grantee = grant['Grantee']
+                uri = grantee['URI'] if 'URI' in grantee else ''
                 if 'AllUsers' in uri:
                     issues.append(f"ACL grants anonymous access: {grant['Permission']}")
                 elif 'AuthenticatedUsers' in uri:
@@ -571,7 +575,7 @@ DANGEROUS_POLICIES = {
 
 
 def iter_policy_statements(doc):
-    stmt = doc.get('Statement', [])
+    stmt = doc['Statement']
     return [stmt] if isinstance(stmt, dict) else stmt
 
 
@@ -603,9 +607,10 @@ def find_overprivileged_roles():
                     PolicyName=pol_name,
                 )['PolicyDocument']
                 for stmt in iter_policy_statements(doc):
-                    if stmt.get('Effect') != 'Allow':
+                    if stmt['Effect'] != 'Allow':
                         continue
-                    if actions_include_star(stmt.get('Action', '')):
+                    action = stmt['Action'] if 'Action' in stmt else ''
+                    if actions_include_star(action):
                         role_issues.append(f"Inline '{pol_name}': Action contains '*'")
             if role_issues:
                 findings.append({'role': role_name, 'issues': role_issues})
@@ -630,7 +635,7 @@ s3 = boto3.client('s3')
 
 
 def iter_policy_statements(policy):
-    stmt = policy.get('Statement', [])
+    stmt = policy['Statement']
     return [stmt] if isinstance(stmt, dict) else stmt
 
 
@@ -657,7 +662,7 @@ def enforce_https(bucket_name):
         else:
             raise
     statements = iter_policy_statements(existing)
-    if not any(s.get('Sid') == 'DenyInsecureTransport' for s in statements):
+    if not any(s['Sid'] == 'DenyInsecureTransport' for s in statements if 'Sid' in s):
         statements.append(deny_http)
         existing['Statement'] = statements
         s3.put_bucket_policy(Bucket=bucket_name, Policy=json.dumps(existing))
