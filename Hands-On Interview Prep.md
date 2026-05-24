@@ -230,7 +230,7 @@ def find_open_security_groups():
                         })
     for f in findings:
         print(f"[OPEN] {f['sg_id']} ({f['sg_name']}) {f['direction']} "
-              f"port {f['port']} → {f['open_to']}")
+              f"port {f['port']} -> {f['open_to']}")
     return findings
 
 
@@ -410,11 +410,11 @@ def investigate_access_key(access_key_id, hours_back=72):
     }
     found_risky = risky & set(api_calls.keys())
     if found_risky:
-        print(f"\n⚠ HIGH-RISK API calls detected: {found_risky}")
+        print(f"\n[WARN] HIGH-RISK API calls detected: {found_risky}")
     return events
 
 
-# GuardDuty credential exfil often surfaces a session key (ASIA…), not AKIA…
+# GuardDuty credential exfil often surfaces a session key (ASIA...), not AKIA...
 investigate_access_key('ASIA1234567890EXAMPLE')
 ```
 
@@ -446,14 +446,14 @@ def reenable_cloudtrail_logging():
             ct.start_logging(Name=trail_name)
             verify = ct.get_trail_status(Name=trail_name)
             if verify['IsLogging']:
-                print("  ✓ Logging re-enabled and confirmed")
+                print("  [OK] Logging re-enabled and confirmed")
                 fixed.append({
                     'trail': trail_name,
                     'arn': trail_arn,
                     'last_delivery': str(stop_time),
                 })
             else:
-                print("  ✗ Failed to re-enable; investigate manually")
+                print("  [FAIL] Failed to re-enable; investigate manually")
         else:
             print(f"[OK] {trail_name}: logging active")
 
