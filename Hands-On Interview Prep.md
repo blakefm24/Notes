@@ -572,7 +572,7 @@ def find_public_buckets():
 find_public_buckets()
 ```
 
-**How it works:** Each bucket is evaluated against three independent exposure vectors. First, Block Public Access (BPA): all four settings (`BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets`) must be true; a missing BPA configuration is itself a finding. Second, the bucket policy: statements with `Effect: Allow` and a public principal (`*` or `Principal: `*) are flagged. Third, the bucket ACL: grants to `AllUsers` (anonymous) or `AuthenticatedUsers` (any AWS account) are flagged. A regional S3 client is created per bucket because `list_buckets` is global but policy and ACL APIs are regional. `ClientError` handling distinguishes "no policy" (expected) from permission errors. Public exposure can exist at any layer even when others are locked down; checking all three reflects defense-in-depth understanding.
+**How it works:** Each bucket is evaluated against three independent exposure vectors. First, Block Public Access (BPA): all four settings (`BlockPublicAcls`, `IgnorePublicAcls`, `BlockPublicPolicy`, `RestrictPublicBuckets`) must be true; a missing BPA configuration is itself a finding. Second, the bucket policy: statements with `Effect: Allow` and a public principal (`*` or `Principal:` *) are flagged. Third, the bucket ACL: grants to `AllUsers` (anonymous) or `AuthenticatedUsers` (any AWS account) are flagged. A regional S3 client is created per bucket because `list_buckets` is global but policy and ACL APIs are regional. `ClientError` handling distinguishes "no policy" (expected) from permission errors. Public exposure can exist at any layer even when others are locked down; checking all three reflects defense-in-depth understanding.
 
 ### 7. Find IAM Roles with Admin Access
 
@@ -638,7 +638,7 @@ def find_overprivileged_roles():
 find_overprivileged_roles()
 ```
 
-**How it works:** The script paginates through all IAM roles and checks two permission sources. Attached managed policies are compared against a set of known high-privilege AWS managed policy ARNs (`AdministratorAccess`, `IAMFullAccess`, `PowerUserAccess`). Inline policies are fetched individually and parsed for `Action: `* or `Action: ["...", "*"]` in Allow statements, which grant unrestricted access within the policy's resource scope. A helper normalizes policy documents where `Statement` may be a single object or a list (common in both IAM and S3 policy formats). This audit identifies lateral movement targets after compromise; in the interview, pair findings with remediation paths (scoped custom policies, permission boundaries, SCPs to cap maximum permissions).
+**How it works:** The script paginates through all IAM roles and checks two permission sources. Attached managed policies are compared against a set of known high-privilege AWS managed policy ARNs (`AdministratorAccess`, `IAMFullAccess`, `PowerUserAccess`). Inline policies are fetched individually and parsed for `Action:` * or `Action: ["...", "*"]` in Allow statements, which grant unrestricted access within the policy's resource scope. A helper normalizes policy documents where `Statement` may be a single object or a list (common in both IAM and S3 policy formats). This audit identifies lateral movement targets after compromise; in the interview, pair findings with remediation paths (scoped custom policies, permission boundaries, SCPs to cap maximum permissions).
 
 ### 8. Enforce HTTPS on an S3 Bucket
 
@@ -692,7 +692,7 @@ def enforce_https(bucket_name):
 enforce_https('my-sensitive-bucket')
 ```
 
-**How it works:** The script adds a bucket policy `Deny` statement conditioned on `aws:SecureTransport: false`, which blocks any request not made over TLS regardless of what Allow statements exist elsewhere in the policy (explicit deny wins in AWS policy evaluation). The existing bucket policy is fetched and parsed first; if no policy exists, a new document is created rather than overwriting unrelated configuration. The check for an existing `DenyInsecureTransport` Sid makes the operation idempotent. The deny applies to both the bucket and object ARNs (`bucket/*`). In the interview, note this is a data-at-rest/in-transit control at the bucket layer; it complements (but does not replace) encryption settings and CloudFront/ALB HTTPS termination upstream.
+**How it works:** The script adds a bucket policy `Deny` statement conditioned on `aws:SecureTransport: false`, which blocks any request not made over TLS regardless of what Allow statements exist elsewhere in the policy (explicit deny wins in AWS policy evaluation). The existing bucket policy is fetched and parsed first; if no policy exists, a new document is created rather than overwriting unrelated configuration. The check for an existing `DenyInsecureTransport` Sid makes the operation idempotent. The deny applies to both the bucket and object ARNs (`bucket/`*). In the interview, note this is a data-at-rest/in-transit control at the bucket layer; it complements (but does not replace) encryption settings and CloudFront/ALB HTTPS termination upstream.
 
 ---
 
@@ -702,11 +702,13 @@ Wiz answers the same audit questions as the boto3 snippets through the **Securit
 
 ### How to use this section in the interview
 
-| Moment | Lead with |
-|--------|-----------|
-| Steady-state / posture | Wiz Issues or Graph search (continuous, prioritized, attack-path context) |
-| Active IR / CoderPad ask | boto3 (immediate, account-local, chains into containment) |
-| Showing Wiz depth | One natural-language graph query + one attack-path example for the scenario |
+
+| Moment                   | Lead with                                                                   |
+| ------------------------ | --------------------------------------------------------------------------- |
+| Steady-state / posture   | Wiz Issues or Graph search (continuous, prioritized, attack-path context)   |
+| Active IR / CoderPad ask | boto3 (immediate, account-local, chains into containment)                   |
+| Showing Wiz depth        | One natural-language graph query + one attack-path example for the scenario |
+
 
 **Framing line:** "Day to day, Wiz owns detection and prioritization on the graph; during an incident I'd still hit IAM and EC2 APIs directly to contain and verify scope before the dashboard catches up."
 
@@ -927,7 +929,7 @@ WHERE attached_policy_arn CONTAINS "AdministratorAccess"
 
 **Issues shortcut:** CIEM / "Overly permissive role" / "Admin privileges" configuration or Issues views.
 
-**Depth probe:** Wiz CIEM shows **effective permissions** and **unused access**; boto3 only checks attached ARNs and inline `Action: *`.
+**Depth probe:** Wiz CIEM shows **effective permissions** and **unused access**; boto3 only checks attached ARNs and inline `Action: `*.
 
 ---
 
@@ -1005,16 +1007,18 @@ If asked how Wiz works under the hood: natural language and text queries compile
 
 ### Quick reference: boto3 vs Wiz
 
-| Audit | boto3 (IR / CoderPad) | Wiz (steady-state) |
-|-------|------------------------|---------------------|
-| Open SGs | `describe_security_groups` | Graph: open CIDR rules; Issues |
-| IMDSv1 | `describe_instances` + `MetadataOptions` | Config finding + attack path |
-| Quarantine | snapshot, `modify_instance_attribute`, tags | Findings + blast radius on graph |
-| Access key activity | `lookup_events` / Athena | Identity risk + detections |
-| Trail stopped | `get_trail_status`, `start_logging` | Config finding + Stealth correlation |
-| Public S3 | BPA + policy + ACL APIs | `FIND datastore ... public = true` |
-| Admin roles | `list_roles` + policy APIs | CIEM / overprivileged identity |
-| HTTPS on S3 | merge bucket policy | Config finding + policy gap |
+
+| Audit               | boto3 (IR / CoderPad)                       | Wiz (steady-state)                   |
+| ------------------- | ------------------------------------------- | ------------------------------------ |
+| Open SGs            | `describe_security_groups`                  | Graph: open CIDR rules; Issues       |
+| IMDSv1              | `describe_instances` + `MetadataOptions`    | Config finding + attack path         |
+| Quarantine          | snapshot, `modify_instance_attribute`, tags | Findings + blast radius on graph     |
+| Access key activity | `lookup_events` / Athena                    | Identity risk + detections           |
+| Trail stopped       | `get_trail_status`, `start_logging`         | Config finding + Stealth correlation |
+| Public S3           | BPA + policy + ACL APIs                     | `FIND datastore ... public = true`   |
+| Admin roles         | `list_roles` + policy APIs                  | CIEM / overprivileged identity       |
+| HTTPS on S3         | merge bucket policy                         | Config finding + policy gap          |
+
 
 CloudTrail and VPC Flow Log hunts: [Log Analysis: Athena & Splunk](#log-analysis-athena--splunk).
 
@@ -1034,11 +1038,13 @@ Replace placeholders before running: `ASIA...`, `10.0.1.50`, `eni-...`, date par
 
 ### Prerequisites (say out loud if asked)
 
-| Source | Athena | Splunk |
-|--------|--------|--------|
-| CloudTrail | Table over S3 delivery bucket (e.g. `cloudtrail_logs`), or **CloudTrail Lake** event data store | Index/sourcetype from Splunk Add-on for AWS (e.g. `index=aws_ct sourcetype=aws:cloudtrail`) |
-| VPC Flow Logs | Table over flow log S3 prefix (e.g. `vpc_flow_logs`) | Index (e.g. `index=aws_vpcflow sourcetype=aws:vpcflow`) |
-| Partitions | `year` / `month` / `day` on CloudTrail; `date` on flow logs | `earliest` / `latest` in search time range |
+
+| Source        | Athena                                                                                          | Splunk                                                                                      |
+| ------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| CloudTrail    | Table over S3 delivery bucket (e.g. `cloudtrail_logs`), or **CloudTrail Lake** event data store | Index/sourcetype from Splunk Add-on for AWS (e.g. `index=aws_ct sourcetype=aws:cloudtrail`) |
+| VPC Flow Logs | Table over flow log S3 prefix (e.g. `vpc_flow_logs`)                                            | Index (e.g. `index=aws_vpcflow sourcetype=aws:vpcflow`)                                     |
+| Partitions    | `year` / `month` / `day` on CloudTrail; `date` on flow logs                                     | `earliest` / `latest` in search time range                                                  |
+
 
 **CloudTrail key fields:** `eventname`, `eventtime`, `sourceipaddress`, `useridentity.accesskeyid`, `useridentity.arn`, `useridentity.type`, `requestparameters`, `errorcode`
 
@@ -1529,15 +1535,17 @@ Lake avoids manual partition columns and supports org-wide stores; syntax is clo
 
 ### Quick reference: investigation tool pick
 
-| Question | First look | Deep hunt |
-|----------|------------|-----------|
-| What APIs did this key call? | `lookup_events` | Athena / Splunk on CloudTrail |
-| Did they read S3 objects? | Same (if data events on) | Athena `GetObject` filter |
-| Who stopped CloudTrail? | GuardDuty Stealth finding | `StopLogging` in Athena / Splunk |
-| Who made the bucket public? | Wiz Issue | `PutBucketPolicy` / BPA APIs |
-| Did attacker IP hit the instance? | GuardDuty source IP | VPC Flow Logs `srcaddr` → `dstaddr` |
-| Is the instance calling out? | Runtime / GD C2 finding | Flow logs egress from `srcaddr` |
-| Port scan / open port 80? | GD Recon finding | Flow logs `REJECT` / `ACCEPT` on :80 |
+
+| Question                          | First look                | Deep hunt                            |
+| --------------------------------- | ------------------------- | ------------------------------------ |
+| What APIs did this key call?      | `lookup_events`           | Athena / Splunk on CloudTrail        |
+| Did they read S3 objects?         | Same (if data events on)  | Athena `GetObject` filter            |
+| Who stopped CloudTrail?           | GuardDuty Stealth finding | `StopLogging` in Athena / Splunk     |
+| Who made the bucket public?       | Wiz Issue                 | `PutBucketPolicy` / BPA APIs         |
+| Did attacker IP hit the instance? | GuardDuty source IP       | VPC Flow Logs `srcaddr` → `dstaddr`  |
+| Is the instance calling out?      | Runtime / GD C2 finding   | Flow logs egress from `srcaddr`      |
+| Port scan / open port 80?         | GD Recon finding          | Flow logs `REJECT` / `ACCEPT` on :80 |
+
 
 ---
 
