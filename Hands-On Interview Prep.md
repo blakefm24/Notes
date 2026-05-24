@@ -2,12 +2,14 @@
 
 **Tuesday, May 26 (90 minutes) with the security engineering team.** This isn't a trivia quiz (or so they say :P). The format is a live incident scenario for a NOA-like company (multi-department AWS environment with customer-facing web services), with real GuardDuty/Wiz screenshots, working through triage, prioritization, and remediation out loud. CoderPad is included for live scripting demos: quick Python/Bash to solve a problem they surface, not a LeetCode exercise. The recruiter says the team keeps it light (top-tier memes); treat it as a working session, not a grilling. Prep below is organized around their six evaluation criteria.
 
-| Detail | Value |
-| --- | --- |
-| Interview Length | 90 min with security engineering team |
-| Core Format | 1 incident, GuardDuty/Wiz triggered |
-| Scripting Demo | CoderPad: Python/Bash expected |
-| Evaluation Criteria | 6 areas listed by recruiter |
+
+| Detail              | Value                                 |
+| ------------------- | ------------------------------------- |
+| Interview Length    | 90 min with security engineering team |
+| Core Format         | 1 incident, GuardDuty/Wiz triggered   |
+| Scripting Demo      | CoderPad: Python/Bash expected        |
+| Evaluation Criteria | 6 areas listed by recruiter           |
+
 
 ## Table of contents
 
@@ -33,6 +35,7 @@
 The evaluation targets thought process, not a rubric of AWS service names.
 
 When incident screenshots are shown, use this mental model:
+
 1. **Orient:** Read the GuardDuty/Wiz finding. State what type of alert it is (e.g., "This is a `Recon:EC2/PortProbeUnprotectedPort` finding: someone is probing an exposed port"). Ask clarifying questions about the environment: how many accounts, what services are in scope, what logging exists.
 2. **Prioritize:** Assess severity. Is this active exploitation or a misconfiguration? What's the blast radius? Is sensitive data (customer PII, game IP) reachable from the affected resource? Name what to triage first and why.
 3. **Contain:** Describe immediate actions: isolate the resource, revoke credentials, preserve evidence. Be specific about which AWS actions to take.
@@ -46,6 +49,7 @@ When incident screenshots are shown, use this mental model:
 > **What They'll Evaluate (from recruiter):** Keeping agents/services enabled for threat detection. Gaps in monitoring coverage.
 
 ### Core Knowledge
+
 - **What it analyzes:** CloudTrail management & data events, VPC Flow Logs, DNS query logs, EKS audit logs, S3 data events, Lambda network activity, and RDS login events. These are *protection plans* that can be individually enabled.
 - **Common gap:** GuardDuty is enabled but S3 Protection or EKS Protection is off; the org thinks they're covered, but entire data planes are unmonitored. If an incident is shown and they ask "why didn't we catch this sooner," check which protection plans are active.
 - **Finding types to know cold:**
@@ -68,6 +72,7 @@ When the GuardDuty screenshot is shown, read the finding type, severity, affecte
 > **What They'll Evaluate (from recruiter):** Enabling and retaining audit logs. Using logs for investigations, compliance, and incident response.
 
 ### Core Knowledge
+
 - **Trail types:** Management events (API calls like `RunInstances`, `CreateBucket`) are enabled by default. Data events (S3 `GetObject`/`PutObject`, Lambda invocations) are *not*; these must be explicitly enabled and cost more, but they're critical for investigating data exfil.
 - **Organization trail:** A single trail in the management account captures events from all member accounts. The incident scenario is multi-department, so expect this to be relevant.
 - **Retention matters:** Default console view is 90 days. For compliance and IR, send events to an S3 bucket with lifecycle policies (keep 1+ year) and to CloudWatch Logs or a SIEM for real-time alerting. If they ask about compliance, mention that SOC 2 and PCI-DSS require durable audit logs.
@@ -86,6 +91,7 @@ If scripting is requested, a CloudTrail log parser is likely. Something like: "G
 > **What They'll Evaluate (from recruiter):** Best practices for traffic rules. Risks of overly permissive rules. Principles of least privilege for network access. CIDR ranges and exposure risks.
 
 ### Core Knowledge
+
 - **Security groups are stateful firewalls.** If inbound is allowed, the return traffic is automatically allowed. NACLs are stateless (both directions must be explicitly allowed).
 - **The red flag:** Inbound rule with `0.0.0.0/0` on port 22 (SSH) or 3389 (RDP). This is the most common misconfiguration they'll test. In the incident scenario, an open port may be the entry point.
 - **Least privilege for SGs:** Reference other security groups instead of CIDR ranges when possible (e.g., "allow inbound 443 from the ALB security group" rather than a /16 block). Use specific CIDR ranges only for known external IPs (VPN, office).
@@ -104,6 +110,7 @@ Possible scripting ask: "Write a script to find all security groups with inbound
 > **What They'll Evaluate (from recruiter):** Securing S3 buckets/cloud storage. Read/write access across accounts. Encryption, access policies, and data exposure risks.
 
 ### Core Knowledge
+
 - **Public access controls:** S3 Block Public Access settings exist at both the account level and bucket level. Account-level BPA should be on by default. If a bucket is public, it means someone deliberately (or accidentally) overrode it. Wiz flags this aggressively.
 - **Bucket policies vs. ACLs:** Modern best practice is to disable ACLs entirely (bucket owner enforced) and use bucket policies for all access control. ACLs are legacy and hard to audit. If the scenario shows an ACL granting access, call it out as a misconfiguration.
 - **Cross-account access:** In a multi-department setup, departments share S3 data via bucket policies with `Principal` set to a specific account/role ARN. The risk: overly broad principals (`"Principal": "*"` or `"Principal": {"AWS": "*"}`). Always scope to specific accounts, roles, and add `aws:PrincipalOrgID` conditions.
@@ -118,6 +125,7 @@ Possible scripting ask: "Write a script to find all security groups with inbound
 > **What They'll Evaluate (from recruiter):** IAM role/policies and least privilege design. Attaching roles to compute resources/instances. Managed policies, like Systems Manager access.
 
 ### Core Knowledge
+
 - **Roles on compute:** EC2 instances, Lambda functions, and ECS tasks should use IAM roles (via instance profiles or task roles), never long-lived access keys. The role provides short-term credentials from IMDS (EC2) or the container credential provider (ECS). If the incident involves static keys on an instance, flag it.
 - **Systems Manager (SSM):** The recruiter called this out specifically. The `AmazonSSMManagedInstanceCore` managed policy allows SSM Agent to communicate with Systems Manager; this enables Session Manager access (replaces SSH), patch management, and inventory. The risk: this policy also allows `ssm:SendCommand` which can execute arbitrary commands on instances. Scope it tightly.
 - **Least privilege design:** Start with zero permissions and add. Use IAM Access Analyzer to generate policies from CloudTrail activity. Scope resources to specific ARNs (not `*`). Add conditions: `aws:SourceVpc`, `aws:RequestedRegion`, `aws:PrincipalTag`.
@@ -136,6 +144,7 @@ Possible ask: "Find all IAM roles with AdministratorAccess attached" or "List al
 > **What They'll Evaluate (from recruiter):** Proper use of secure ports/protocols like HTTPS. Controlling outbound access and restricting unnecessary connectivity.
 
 ### Core Knowledge
+
 - **Enforce HTTPS everywhere:** Ensure S3 bucket policies include a `Deny` statement with condition `"aws:SecureTransport": "false"` to block HTTP. Redirect HTTP → HTTPS on ALBs and CloudFront. TLS 1.2+ minimum.
 - **Outbound restriction:** Default security groups allow all egress. Lock egress down to only necessary destinations: port 443 for HTTPS to known endpoints, NTP (port 123), DNS (port 53). Use VPC endpoints for AWS services (S3, SSM, CloudWatch) to keep traffic off the public internet entirely.
 - **Why outbound matters:** Unrestricted egress is how data gets exfiltrated and how compromised instances reach C2 servers. If the incident shows an EC2 instance calling out to an unknown IP on port 443, the question is "why was this allowed?" The answer: no egress filtering.
@@ -157,7 +166,7 @@ Based on the recruiter's description, below is a plausible incident walkthrough 
 - **Investigate (CloudTrail):** Query CloudTrail for all API calls made by the compromised role's access key in the last 72 hours. Look for: `ListBuckets`, `GetObject` (data exfil), `CreateAccessKey` (persistence), any IAM modifications. Check VPC Flow Logs for the external IP that used the stolen credentials.
 - **Remediate (all six areas):**
   - **S3:** Enable account-level Block Public Access. Fix the bucket policy. Enable SSE-KMS.
-  - **IAM:** Scope the role to specific bucket ARNs. Remove `s3:*` and replace with `s3:GetObject` on necessary resources only.
+  - **IAM:** Scope the role to specific bucket ARNs. Remove `s3:`* and replace with `s3:GetObject` on necessary resources only.
   - **SG:** Remove `0.0.0.0/0` inbound. Move the instance to a private subnet behind an ALB.
   - **IMDS:** Enforce IMDSv2 (`HttpTokens=required`) on all instances via launch templates.
   - **Connectivity:** Add an S3 VPC endpoint with an endpoint policy scoped to the necessary buckets. Restrict egress in the SG.
@@ -961,6 +970,7 @@ This framing matters because it shows the fix is not just the incident; it close
 ### How to Frame Answers for Their Environment
 
 The scenario is *"a similar company to NOA, with multiple departments using AWS services to store and transform data, and customer-facing online web services."* Relevant context: Nintendo Switch Online, eShop, game analytics pipelines, marketing sites.
+
 - **Multi-department = multi-account:** Each department (game dev, online services, marketing, data analytics) likely has its own AWS account under an Organization. Answers should assume cross-account visibility and centralized security tooling.
 - **"Store and transform data":** S3 + Glue/Athena/EMR pipelines. Data security (encryption, access policies, data perimeters) is a first-class concern. Unreleased game assets in S3 are high-value targets.
 - **"Customer-facing web services":** ALBs, EC2/ECS, API Gateway. Public-facing attack surface. Security group hygiene, WAF configuration, and DDoS protection (Shield) are relevant.
@@ -971,9 +981,10 @@ The scenario is *"a similar company to NOA, with multiple departments using AWS 
 
 - "How many AWS accounts are you managing, and do you use a centralized security account for GuardDuty and Security Hub?"
 - "What does your IR runbook process look like today: is it documented, or are you building it out?"
-- "How do you handle security for game launch events when infrastructure scales rapidly?"
+- "How do you handle security for game launch events or holiday seasons when infrastructure scales rapidly?"
 - "What's the split between proactive engineering (hardening, automation) and reactive work (incidents, tickets) in this role?"
-- "How does the NOA security team coordinate with the global team in Kyoto?"
+- "How does the NOA security team coordinate with the global team in Japan? Are there opportunities for in-person collaboration there?"
+- "Given the small size of your team, how does that impact how you support each other?"
 
 ---
 
@@ -981,10 +992,10 @@ The scenario is *"a similar company to NOA, with multiple departments using AWS 
 
 The canonical cloud security incident; good to reference if the scenario is similar.
 
-- 2019. Attacker exploited SSRF vulnerability in a misconfigured ModSecurity WAF on EC2.
+- 1. Attacker exploited SSRF vulnerability in a misconfigured ModSecurity WAF on EC2.
 - Queried IMDSv1 (`169.254.169.254`) to get temp credentials for the `ISRM-WAF-Role`.
 - That role had excessive permissions: `s3:ListBucket`, `s3:GetObject` on all buckets, plus `kms:Decrypt`.
 - Exfiltrated 30 GB / 106M individuals' credit application data.
-
 - **Every evaluation area failed:** IMDSv1 (no session tokens), overly permissive IAM role, no SG egress filtering, no S3 data event logging to catch the exfil in real-time, no outbound network segmentation, and CloudTrail analysis happened only after the breach was reported months later.
 - **IMDSv2 would have blocked** the SSRF path: PUT request + headers are beyond most SSRF capabilities.
+
