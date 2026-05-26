@@ -432,9 +432,9 @@ investigate_access_key('ASIA1234567890EXAMPLE')
 
 ### 5. Per-Account CloudTrailToSec Toward Central Log Bucket
 
-**Likely prompt:** GuardDuty fires `Stealth:IAMUser/CloudTrailLoggingDisabled` (or auditing finds gaps). Standard at scale: every member account holds a trail named `**CloudTrailToSec`** in `**us-west-2**` (same pattern across the estate; demo names differ from Sony). Trails do **not** use an AWS **organization-level** trail API; instead each account's trail delivers logs to **one centralized S3 bucket** in the security account (placeholder ID `**111122223333`**). Bucket name `**central-cloudtrail**` relies on bucket policy + trail service principal and cross-account `PutObject` from member accounts.
+**Likely prompt:** GuardDuty fires `Stealth:IAMUser/CloudTrailLoggingDisabled` (or auditing finds gaps). Standard at scale: every member account holds a trail named `**CloudTrailToSec`** in `**us-west-2`** (same pattern across the estate; demo names differ from Sony). Trails do **not** use an AWS **organization-level** trail API; instead each account's trail delivers logs to **one centralized S3 bucket** in the security account (placeholder ID `**111122223333`**). Bucket name `**central-cloudtrail`** relies on bucket policy + trail service principal and cross-account `PutObject` from member accounts.
 
-**Interview anchor from Sony experience:** Multiple AWS Organizations existed; remediation runs **per org** by passing that org's **management account ID** (Organizations API and `list_accounts` scope to that org). The fleet enforced the same trail name in every member account, always in `**us-west-2`**, with logs written to `**central-cloudtrail**` in the security account. The script verifies `**CloudTrailToSec` exists in `us-west-2`, targets the central bucket, and `IsLogging` is true.** If logging stopped, `**start_logging`** remediates.
+**Interview anchor from Sony experience:** Multiple AWS Organizations existed; remediation runs **per org** by passing that org's **management account ID**. After a CloudTrail refactor, member accounts still pointing at the **legacy delivery bucket** were migrated to **`central-cloudtrail`** in account **`111122223333`** via **`update_trail`** (stop logging, change bucket, restart). The script also verifies **`IsLogging`** and calls **`start_logging`** when logging was stopped.
 
 ```python
 import boto3
@@ -481,23 +481,42 @@ def list_org_accounts(org_management_account_id):
     return accounts
 
 
-def find_trail_named(session, trail_name, home_region):
-    """Locate CloudTrailToSec in the standard home region (us-west-2)."""
-    ct = session.client('cloudtrail', region_name=home_region)
+def find_cloudtrail_to_sec(session):
+    """Locate CloudTrailToSec in us-west-2."""
+    ct = session.client('cloudtrail', region_name=SEC_TRAIL_HOME_REGION)
     for trail in ct.describe_trails(includeShadowTrails=False)['trailList']:
-        if trail['Name'] == trail_name:
+        if trail['Name'] == SEC_TRAIL_NAME:
             return trail
     return None
+
+
+def remediate_trail_delivery_bucket(ct):
+    """Repoint CloudTrailToSec to central-cloudtrail (AWS requires stop before bucket change)."""
+    status = ct.get_trail_status(Name=SEC_TRAIL_NAME)
+    was_logging = status['IsLogging']
+    if was_logging:
+        ct.stop_logging(Name=SEC_TRAIL_NAME)
+    ct.update_trail(Name=SEC_TRAIL_NAME, S3BucketName=EXPECTED_LOG_BUCKET)
+    detail = ct.get_trail(Name=SEC_TRAIL_NAME)['Trail']
+    new_bucket = detail['S3BucketName'] if 'S3BucketName' in detail else None
+    if new_bucket != EXPECTED_LOG_BUCKET:
+        if was_logging:
+            ct.start_logging(Name=SEC_TRAIL_NAME)
+        return False
+    if was_logging:
+        ct.start_logging(Name=SEC_TRAIL_NAME)
+    return True
 
 
 def ensure_cloudtrail_to_sec_logging(
     org_management_account_id=ORG_MANAGEMENT_ACCOUNT_ID,
     role_name=MEMBER_ROLE_NAME,
 ):
-    """Audit one org: every account must have CloudTrailToSec in us-west-2 and logging."""
+    """Every account must have CloudTrailToSec in us-west-2 and logging."""
     fixed = []
     failed = []
     missing_trail = []
+    bucket_remediated = []
     bucket_mismatch = []
 
     print(f"=== Organization management account {org_management_account_id} ===")
@@ -510,7 +529,7 @@ def ensure_cloudtrail_to_sec_logging(
             print(f"[SKIP] Cannot assume role in {account_id}: {code}")
             continue
 
-        meta = find_trail_named(session, SEC_TRAIL_NAME, SEC_TRAIL_HOME_REGION)
+        meta = find_cloudtrail_to_sec(session)
         if meta is None:
             print(f"[MISSING] No '{SEC_TRAIL_NAME}' in {SEC_TRAIL_HOME_REGION} — deploy toward account {SEC_GUARD_ACCOUNT_ID}, bucket {EXPECTED_LOG_BUCKET}")
             missing_trail.append({'account_id': account_id, 'account_name': account_name})
@@ -520,12 +539,22 @@ def ensure_cloudtrail_to_sec_logging(
         detail = ct.get_trail(Name=SEC_TRAIL_NAME)['Trail']
         bucket = detail['S3BucketName'] if 'S3BucketName' in detail else None
         if bucket != EXPECTED_LOG_BUCKET:
-            print(f"[WARN] {SEC_TRAIL_NAME} uses bucket {bucket!r}; expected {EXPECTED_LOG_BUCKET!r}")
-            bucket_mismatch.append({
-                'account_id': account_id,
-                'account_name': account_name,
-                'actual_bucket': bucket,
-            })
+            print(f"[DRIFT] {SEC_TRAIL_NAME} uses bucket {bucket!r}; remediating to {EXPECTED_LOG_BUCKET!r}")
+            if remediate_trail_delivery_bucket(ct):
+                print(f"  [OK] delivery bucket updated to {EXPECTED_LOG_BUCKET}")
+                bucket_remediated.append({
+                    'account_id': account_id,
+                    'account_name': account_name,
+                    'previous_bucket': bucket,
+                })
+            else:
+                print("  [FAIL] update_trail did not apply; check bucket policy in security account")
+                bucket_mismatch.append({
+                    'account_id': account_id,
+                    'account_name': account_name,
+                    'actual_bucket': bucket,
+                })
+                continue
 
         status = ct.get_trail_status(Name=SEC_TRAIL_NAME)
         if status['IsLogging']:
@@ -556,12 +585,14 @@ def ensure_cloudtrail_to_sec_logging(
 
     print(f"\n=== Summary (org {org_management_account_id}) ===")
     print(f"Re-enabled logging: {len(fixed)}  Failed: {len(failed)}  Missing trail: {len(missing_trail)}")
-    print(f"Bucket drift: {len(bucket_mismatch)}  (expected: account {SEC_GUARD_ACCOUNT_ID} → s3://{EXPECTED_LOG_BUCKET}/)")
+    print(f"Bucket repointed: {len(bucket_remediated)}  Bucket update failed: {len(bucket_mismatch)}")
+    print(f"(target: account {SEC_GUARD_ACCOUNT_ID} → s3://{EXPECTED_LOG_BUCKET}/)")
     return {
         'org_management_account_id': org_management_account_id,
         'fixed': fixed,
         'failed': failed,
         'missing_trail': missing_trail,
+        'bucket_remediated': bucket_remediated,
         'bucket_mismatch': bucket_mismatch,
     }
 
@@ -570,9 +601,9 @@ def ensure_cloudtrail_to_sec_logging(
 ensure_cloudtrail_to_sec_logging(ORG_MANAGEMENT_ACCOUNT_ID)
 ```
 
-**How it works:** The script runs from the **security automation account** (or a break-glass runner) and targets **one AWS Organization at a time** via `**ORG_MANAGEMENT_ACCOUNT_ID`** (placeholder `**444455556666**`). It assumes `**SecurityAutomationRole**` into that **management account**, calls `**organizations:ListAccounts`** for members of **that org only**, then assumes into each member account to check `**CloudTrailToSec`** in `**us-west-2**`. Delivery must point at `**central-cloudtrail**` in `**SEC_GUARD_ACCOUNT_ID**` (`111122223333`). Sony operated **multiple orgs**; repeat the function with each org's management account ID (or wrap a list and loop in production).
+**How it works:** The script runs from the **security automation account** (or a break-glass runner) and targets **one AWS Organization at a time** via `**ORG_MANAGEMENT_ACCOUNT_ID`** (placeholder `**444455556666`**). It assumes `**SecurityAutomationRole**` into that **management account**, calls `**organizations:ListAccounts`** for members of **that org only**, then assumes into each member account to check `**CloudTrailToSec`** in `**us-west-2`**. Delivery must point at `**central-cloudtrail**` in `**SEC_GUARD_ACCOUNT_ID**` (`111122223333`). Sony operated **multiple orgs**; repeat the function with each org's management account ID (or wrap a list and loop in production).
 
-`describe_trails` in `**us-west-2`** only; `**get_trail_status` / `start_logging**` use `**SEC_TRAIL_HOME_REGION**`. Failures usually trace to cross-account `**s3:PutObject**` on the central bucket, KMS policy limits, or SCP denies ([SCP 2](#scp-2-prevent-disabling-cloudtrail)).
+`describe_trails` in **`us-west-2`** only. When **`S3BucketName`** is not **`central-cloudtrail`**, the script calls **`stop_logging`**, **`update_trail`** (legacy bucket migration after the Sony refactor), verifies the new bucket, and restarts logging if it was on before. Then **`get_trail_status` / `start_logging`** handle accounts where logging was still off. **`update_trail`** fails if the central bucket policy in **`SEC_GUARD_ACCOUNT_ID`** does not allow delivery from the member account.
 
 Sony talking points: Splunk / Athena query `**central-cloudtrail**` once per ingest path; `**start_logging**` does not backfill gaps; multi-org means **scoped `list_accounts`**, not one global enumeration from the wrong management account.
 
@@ -930,7 +961,7 @@ AND last_active within 72 hours
 
 **Natural language:**
 
-- Per-account `**CloudTrailToSec`** not logging toward `**central-cloudtrail`** in security account `**111122223333**`
+- Per-account `**CloudTrailToSec`** not logging toward `**central-cloudtrail`** in security account `**111122223333`**
 - Accounts missing the standardized security trail across the org
 
 **Security Graph (text-style WQL):**
@@ -948,7 +979,7 @@ AND is_logging = false
 
 **Issues shortcut:** Search Issues for "CloudTrail logging disabled" or `StopLogging`-related configuration findings.
 
-**Depth probe:** Pair with GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled` and Athena over `**central-cloudtrail`** for who invoked `**StopLogging**`. Sony-style fleets use the same trail name in every account; **[MISSING]** equals governance drift. `**list_accounts`** must run from the correct org **management account ID** (`ORG_MANAGEMENT_ACCOUNT_ID`); multiple orgs at Sony mean one remediation pass per org.
+**Depth probe:** Pair with GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled` and Athena over `**central-cloudtrail`** for who invoked `**StopLogging`**. Sony-style fleets use the same trail name in every account; **[MISSING]** equals governance drift. `**list_accounts`** must run from the correct org **management account ID** (`ORG_MANAGEMENT_ACCOUNT_ID`); multiple orgs at Sony mean one remediation pass per org.
 
 ---
 
