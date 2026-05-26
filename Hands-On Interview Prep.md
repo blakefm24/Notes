@@ -430,63 +430,153 @@ investigate_access_key('ASIA1234567890EXAMPLE')
 
 **How it works:** Triage starts with `lookup_events`, filtered by `AccessKeyId` and a configurable time window (default 72 hours). Results are paginated and aggregated by `EventName` to produce a quick picture of attacker activity. A predefined set of high-risk API calls (privilege escalation, persistence, log tampering) is intersected with the observed calls to surface immediate threats. `lookup_events` is suitable for initial triage but is subject to API limits and retention caps (~90 days); for a full investigation, pivot to CloudTrail Lake or Athena queries against the org trail in S3. GuardDuty credential exfil findings often surface session keys (`ASIA...`) rather than long-term keys (`AKIA...`); both work as lookup attributes.
 
-### 5. Re-Enable CloudTrail Logging
+### 5. Per-Account CloudTrailToSec Toward Central Log Bucket
 
-**Likely prompt:** GuardDuty fires `Stealth:IAMUser/CloudTrailLoggingDisabled`: an attacker (or misconfiguration) stopped logging to cover tracks. "How would you find and fix all disabled trails?"
+**Likely prompt:** GuardDuty fires `Stealth:IAMUser/CloudTrailLoggingDisabled` (or auditing finds gaps). Standard at scale: every member account holds a trail named `**CloudTrailToSec`** in `**us-west-2**` (same pattern across the estate; demo names differ from Sony). Trails do **not** use an AWS **organization-level** trail API; instead each account's trail delivers logs to **one centralized S3 bucket** in the security account (placeholder ID `**111122223333`**). Bucket name `**central-cloudtrail**` relies on bucket policy + trail service principal and cross-account `PutObject` from member accounts.
+
+**Interview anchor from Sony experience:** Multiple AWS Organizations existed; remediation runs **per org** by passing that org's **management account ID** (Organizations API and `list_accounts` scope to that org). The fleet enforced the same trail name in every member account, always in `**us-west-2`**, with logs written to `**central-cloudtrail**` in the security account. The script verifies `**CloudTrailToSec` exists in `us-west-2`, targets the central bucket, and `IsLogging` is true.** If logging stopped, `**start_logging`** remediates.
 
 ```python
 import boto3
+from botocore.exceptions import ClientError
 
-# Call describe_trails from each region (or the trail home region) for full coverage
-ct = boto3.client('cloudtrail')
+# Standard trail and delivery (placeholders; replace in production)
+SEC_TRAIL_NAME = 'CloudTrailToSec'
+SEC_TRAIL_HOME_REGION = 'us-west-2'
+EXPECTED_LOG_BUCKET = 'central-cloudtrail'
+SEC_GUARD_ACCOUNT_ID = '111122223333'
+
+# Management account for the AWS Organization under audit (placeholder)
+ORG_MANAGEMENT_ACCOUNT_ID = '444455556666'
+
+# Cross-account role assumed into management and member accounts
+MEMBER_ROLE_NAME = 'SecurityAutomationRole'
 
 
-def reenable_cloudtrail_logging():
-    """Find trails with logging stopped and re-enable them."""
-    trails = ct.describe_trails(includeShadowTrails=False)['trailList']
+def assume_role_session(account_id, role_name, session_name='cloudtrail-remediation'):
+    sts = boto3.client('sts')
+    resp = sts.assume_role(
+        RoleArn=f'arn:aws:iam::{account_id}:role/{role_name}',
+        RoleSessionName=session_name,
+    )
+    creds = resp['Credentials']
+    return boto3.Session(
+        aws_access_key_id=creds['AccessKeyId'],
+        aws_secret_access_key=creds['SecretAccessKey'],
+        aws_session_token=creds['SessionToken'],
+    )
+
+
+def list_org_accounts(org_management_account_id):
+    """List ACTIVE accounts in the org; call Organizations from the management account."""
+    mgmt_session = assume_role_session(org_management_account_id, MEMBER_ROLE_NAME)
+    org = mgmt_session.client('organizations')
+    accounts = []
+    paginator = org.get_paginator('list_accounts')
+    for page in paginator.paginate():
+        for acct in page['Accounts']:
+            if acct['Status'] != 'ACTIVE':
+                continue
+            accounts.append((acct['Id'], acct['Name']))
+    return accounts
+
+
+def find_trail_named(session, trail_name, home_region):
+    """Locate CloudTrailToSec in the standard home region (us-west-2)."""
+    ct = session.client('cloudtrail', region_name=home_region)
+    for trail in ct.describe_trails(includeShadowTrails=False)['trailList']:
+        if trail['Name'] == trail_name:
+            return trail
+    return None
+
+
+def ensure_cloudtrail_to_sec_logging(
+    org_management_account_id=ORG_MANAGEMENT_ACCOUNT_ID,
+    role_name=MEMBER_ROLE_NAME,
+):
+    """Audit one org: every account must have CloudTrailToSec in us-west-2 and logging."""
     fixed = []
-    for trail in trails:
-        trail_name = trail['Name']
-        trail_arn = trail['TrailARN']
-        home_region = trail['HomeRegion'] if 'HomeRegion' in trail else 'unknown'
-        # API expects trail name, not ARN
-        status = ct.get_trail_status(Name=trail_name)
-        if not status['IsLogging']:
-            print(f"[STOPPED] {trail_name} ({trail_arn}) region={home_region}")
-            stop_time = status['LatestDeliveryTime'] if 'LatestDeliveryTime' in status else 'unknown'
-            print(f"  Last delivery: {stop_time}")
-            ct.start_logging(Name=trail_name)
-            verify = ct.get_trail_status(Name=trail_name)
-            if verify['IsLogging']:
-                print("  [OK] Logging re-enabled and confirmed")
-                fixed.append({
-                    'trail': trail_name,
-                    'arn': trail_arn,
-                    'last_delivery': str(stop_time),
-                })
-            else:
-                print("  [FAIL] Failed to re-enable; investigate manually")
+    failed = []
+    missing_trail = []
+    bucket_mismatch = []
+
+    print(f"=== Organization management account {org_management_account_id} ===")
+    for account_id, account_name in list_org_accounts(org_management_account_id):
+        print(f"\n--- Account {account_id} ({account_name}) ---")
+        try:
+            session = assume_role_session(account_id, role_name)
+        except ClientError as err:
+            code = err.response['Error']['Code']
+            print(f"[SKIP] Cannot assume role in {account_id}: {code}")
+            continue
+
+        meta = find_trail_named(session, SEC_TRAIL_NAME, SEC_TRAIL_HOME_REGION)
+        if meta is None:
+            print(f"[MISSING] No '{SEC_TRAIL_NAME}' in {SEC_TRAIL_HOME_REGION} — deploy toward account {SEC_GUARD_ACCOUNT_ID}, bucket {EXPECTED_LOG_BUCKET}")
+            missing_trail.append({'account_id': account_id, 'account_name': account_name})
+            continue
+
+        ct = session.client('cloudtrail', region_name=SEC_TRAIL_HOME_REGION)
+        detail = ct.get_trail(Name=SEC_TRAIL_NAME)['Trail']
+        bucket = detail['S3BucketName'] if 'S3BucketName' in detail else None
+        if bucket != EXPECTED_LOG_BUCKET:
+            print(f"[WARN] {SEC_TRAIL_NAME} uses bucket {bucket!r}; expected {EXPECTED_LOG_BUCKET!r}")
+            bucket_mismatch.append({
+                'account_id': account_id,
+                'account_name': account_name,
+                'actual_bucket': bucket,
+            })
+
+        status = ct.get_trail_status(Name=SEC_TRAIL_NAME)
+        if status['IsLogging']:
+            print(f"[OK] {SEC_TRAIL_NAME} logging (region={SEC_TRAIL_HOME_REGION})")
+            continue
+
+        stop_time = status['LatestDeliveryTime'] if 'LatestDeliveryTime' in status else 'unknown'
+        print(f"[STOPPED] {SEC_TRAIL_NAME} region={SEC_TRAIL_HOME_REGION} last_delivery={stop_time}")
+        ct.start_logging(Name=SEC_TRAIL_NAME)
+        verify = ct.get_trail_status(Name=SEC_TRAIL_NAME)
+        if verify['IsLogging']:
+            print("  [OK] Logging re-enabled and confirmed")
+            fixed.append({
+                'account_id': account_id,
+                'account_name': account_name,
+                'trail': SEC_TRAIL_NAME,
+                'home_region': SEC_TRAIL_HOME_REGION,
+                'last_delivery': str(stop_time),
+            })
         else:
-            print(f"[OK] {trail_name}: logging active")
+            print("  [FAIL] start_logging unsuccessful; inspect bucket/KMS policy and SCP denies")
+            failed.append({
+                'account_id': account_id,
+                'account_name': account_name,
+                'trail': SEC_TRAIL_NAME,
+                'home_region': SEC_TRAIL_HOME_REGION,
+            })
 
-    print(f"\nResults: {len(fixed)} trail(s) re-enabled out of {len(trails)} total")
-    if fixed:
-        print("\nNext steps:")
-        print("  1. Query CloudTrail for StopLogging: identify who disabled logging")
-        print("  2. Verify log file validation (digest files) is enabled")
-        print("  3. Confirm the log delivery S3 bucket exists and is accessible")
-        print("  4. Assess log gaps during the disabled window (Athena/Lake)")
-    return fixed
+    print(f"\n=== Summary (org {org_management_account_id}) ===")
+    print(f"Re-enabled logging: {len(fixed)}  Failed: {len(failed)}  Missing trail: {len(missing_trail)}")
+    print(f"Bucket drift: {len(bucket_mismatch)}  (expected: account {SEC_GUARD_ACCOUNT_ID} → s3://{EXPECTED_LOG_BUCKET}/)")
+    return {
+        'org_management_account_id': org_management_account_id,
+        'fixed': fixed,
+        'failed': failed,
+        'missing_trail': missing_trail,
+        'bucket_mismatch': bucket_mismatch,
+    }
 
 
-reenable_cloudtrail_logging()
+# Demo for one org; run again with each org's management account ID
+ensure_cloudtrail_to_sec_logging(ORG_MANAGEMENT_ACCOUNT_ID)
 ```
 
-**How it works:** The script lists all trails in the region with `describe_trails`, then checks each trail's logging state via `get_trail_status` (note: the API expects the trail name, not the ARN). Trails where `IsLogging` is false are re-enabled with `start_logging`, and a second status check confirms the fix. Stopped trails are a common attacker tactic after initial access (GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled`); re-enabling logging is the immediate remediation, but the investigation is not done. Post-fix steps include querying CloudTrail for `StopLogging` events to identify who disabled logging, verifying log file validation (digest files) is enabled, confirming the delivery S3 bucket is intact, and assessing log gaps during the disabled window via Athena or CloudTrail Lake.
+**How it works:** The script runs from the **security automation account** (or a break-glass runner) and targets **one AWS Organization at a time** via `**ORG_MANAGEMENT_ACCOUNT_ID`** (placeholder `**444455556666**`). It assumes `**SecurityAutomationRole**` into that **management account**, calls `**organizations:ListAccounts`** for members of **that org only**, then assumes into each member account to check `**CloudTrailToSec`** in `**us-west-2**`. Delivery must point at `**central-cloudtrail**` in `**SEC_GUARD_ACCOUNT_ID**` (`111122223333`). Sony operated **multiple orgs**; repeat the function with each org's management account ID (or wrap a list and loop in production).
+
+`describe_trails` in `**us-west-2`** only; `**get_trail_status` / `start_logging**` use `**SEC_TRAIL_HOME_REGION**`. Failures usually trace to cross-account `**s3:PutObject**` on the central bucket, KMS policy limits, or SCP denies ([SCP 2](#scp-2-prevent-disabling-cloudtrail)).
+
+Sony talking points: Splunk / Athena query `**central-cloudtrail**` once per ingest path; `**start_logging**` does not backfill gaps; multi-org means **scoped `list_accounts`**, not one global enumeration from the wrong management account.
 
 ### 6. Find Public S3 Buckets
-
-**Likely prompt:** "The incident started with an exposed bucket. How many others are at risk?"
 
 ```python
 import boto3
@@ -836,12 +926,12 @@ AND last_active within 72 hours
 
 ### 5. CloudTrail logging disabled
 
-**Python snippet:** [Re-Enable CloudTrail Logging](#5-re-enable-cloudtrail-logging)
+**Python snippet:** [Per-Account CloudTrailToSec Toward Central Log Bucket](#5-per-account-cloudtrailtosec-toward-central-log-bucket)
 
 **Natural language:**
 
-- CloudTrail trails with logging stopped
-- Accounts where CloudTrail is not logging management events
+- Per-account `**CloudTrailToSec`** not logging toward `**central-cloudtrail`** in security account `**111122223333**`
+- Accounts missing the standardized security trail across the org
 
 **Security Graph (text-style WQL):**
 
@@ -858,7 +948,7 @@ AND is_logging = false
 
 **Issues shortcut:** Search Issues for "CloudTrail logging disabled" or `StopLogging`-related configuration findings.
 
-**Depth probe:** Pair with GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled` and post-fix CloudTrail query for who called `StopLogging`.
+**Depth probe:** Pair with GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled` and Athena over `**central-cloudtrail`** for who invoked `**StopLogging**`. Sony-style fleets use the same trail name in every account; **[MISSING]** equals governance drift. `**list_accounts`** must run from the correct org **management account ID** (`ORG_MANAGEMENT_ACCOUNT_ID`); multiple orgs at Sony mean one remediation pass per org.
 
 ---
 
@@ -1008,16 +1098,16 @@ If asked how Wiz works under the hood: natural language and text queries compile
 ### Quick reference: boto3 vs Wiz
 
 
-| Audit               | boto3 (IR / CoderPad)                       | Wiz (steady-state)                   |
-| ------------------- | ------------------------------------------- | ------------------------------------ |
-| Open SGs            | `describe_security_groups`                  | Graph: open CIDR rules; Issues       |
-| IMDSv1              | `describe_instances` + `MetadataOptions`    | Config finding + attack path         |
-| Quarantine          | snapshot, `modify_instance_attribute`, tags | Findings + blast radius on graph     |
-| Access key activity | `lookup_events` / Athena                    | Identity risk + detections           |
-| Trail stopped       | `get_trail_status`, `start_logging`         | Config finding + Stealth correlation |
-| Public S3           | BPA + policy + ACL APIs                     | `FIND datastore ... public = true`   |
-| Admin roles         | `list_roles` + policy APIs                  | CIEM / overprivileged identity       |
-| HTTPS on S3         | merge bucket policy                         | Config finding + policy gap          |
+| Audit               | boto3 (IR / CoderPad)                                                           | Wiz (steady-state)                   |
+| ------------------- | ------------------------------------------------------------------------------- | ------------------------------------ |
+| Open SGs            | `describe_security_groups`                                                      | Graph: open CIDR rules; Issues       |
+| IMDSv1              | `describe_instances` + `MetadataOptions`                                        | Config finding + attack path         |
+| Quarantine          | snapshot, `modify_instance_attribute`, tags                                     | Findings + blast radius on graph     |
+| Access key activity | `lookup_events` / Athena                                                        | Identity risk + detections           |
+| Trail stopped       | `ensure_cloudtrail_to_sec_logging` (CloudTrailToSec → `**central-cloudtrail`**) | Config finding + Stealth correlation |
+| Public S3           | BPA + policy + ACL APIs                                                         | `FIND datastore ... public = true`   |
+| Admin roles         | `list_roles` + policy APIs                                                      | CIEM / overprivileged identity       |
+| HTTPS on S3         | merge bucket policy                                                             | Config finding + policy gap          |
 
 
 CloudTrail and VPC Flow Log hunts: [Log Analysis: Athena & Splunk](#log-analysis-athena--splunk).
@@ -1190,7 +1280,7 @@ index=aws_ct eventSource=s3.amazonaws.com
 
 ### 4. CloudTrail tampering (`StopLogging` / `DeleteTrail`)
 
-**Maps to:** [Re-Enable CloudTrail Logging](#5-re-enable-cloudtrail-logging), GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled`.
+**Maps to:** [Per-Account CloudTrailToSec Toward Central Log Bucket](#5-per-account-cloudtrailtosec-toward-central-log-bucket), GuardDuty `Stealth:IAMUser/CloudTrailLoggingDisabled`. Query `**central-cloudtrail`** ingest (Athena/Splunk) across all emitting accounts.
 
 **Athena:**
 
