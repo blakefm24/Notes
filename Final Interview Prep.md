@@ -24,6 +24,7 @@ For optional self-study on incident response, GuardDuty/Wiz triage, and scriptin
 - [6. AWS Secrets Manager](#6-aws-secrets-manager)
 - [7. Policy Exception Process](#7-policy-exception-process)
 - [Cross-Cutting Scenarios](#cross-cutting-scenarios)
+- [Platform Ops and Production-Safe IR (Likely Questions)](#platform-ops-and-production-safe-ir-likely-questions)
 - [Questions to Ask the Platform Team](#questions-to-ask-the-platform-team)
 - [Day-Before Checklist](#day-before-checklist)
 
@@ -412,6 +413,94 @@ Rotate immediately in **Secrets Manager**; invalidate old version; scan repo his
 
 ---
 
+## Platform Ops and Production-Safe IR (Likely Questions)
+
+Platform engineers often evaluate whether security **understands production constraints**: shared services, change windows, blast radius of containment actions, and whether IR will **stop the bleeding without taking the platform down**.
+
+### What they are really probing
+
+| Concern | What a strong answer signals |
+| ------- | ---------------------------- |
+| **Availability** | Containment defaults to isolate-and-preserve, not terminate-and-pray |
+| **Blast radius** | Actions are scoped to one account, instance, role, or SG; no org-wide surprises |
+| **Change discipline** | Security coordinates with platform/on-call before disruptive steps |
+| **Operational load** | Controls reduce toil (SSM, IaC, delegated admin), not endless tickets |
+| **Shared ownership** | Runbooks, comms channels, and rollback plans exist before the incident |
+
+### Production-safe IR principles (state these early if asked)
+
+1. **Preserve evidence before disruptive change:** EBS snapshots, CloudTrail retention, tags documenting original SGs.
+2. **Contain without destroying:** quarantine SG, revoke sessions, block egress to known bad IPs; avoid `TerminateInstances` until platform agrees or scope is proven.
+3. **Prefer reversible network changes:** swap SGs (tag originals), avoid deleting subnets, NAT gateways, or shared ALB rules without a diagram review.
+4. **Coordinate on shared infrastructure:** NAT, Transit Gateway, Route 53, centralized logging buckets, org-wide SCPs affect more than one team.
+5. **Communicate:** incident bridge, explicit "planned impact" before IAM denies, secret rotation, or bucket policy changes on production paths.
+6. **Separate detective from disruptive:** gather CloudTrail and flow logs first; auto-remediation in prod often waits for human confirmation unless policy is pre-approved.
+
+### Likely questions: security impact on platform operations
+
+- How will security engage when platform wants to roll out a **new AWS service** or region?
+- How do security standards affect **account vending** and **landing zone** updates (SCPs, Config rules, mandatory logging)?
+- What happens when a **Config rule** or **Security Hub** finding blocks a production deployment pipeline?
+- How should teams request **exceptions** without bypassing platform IaC or creating console drift?
+- How does security reduce **false positives** and on-call noise from GuardDuty, Wiz, or Access Analyzer?
+- Who owns **remediation** when a finding is in a shared VPC, shared RDS, or platform-managed networking stack?
+- How will security participate in **change management** (CAB, maintenance windows) for controls that touch production?
+- What is security's stance on **auto-remediation** in production vs sandbox OUs?
+
+### Likely questions: incident response without outages
+
+- Walk through **containment** for a compromised EC2 in a **production Auto Scaling group** or behind an ALB.
+- Would security **terminate** the instance immediately? Why or why not?
+- How does security **quarantine** an instance without breaking health checks or draining the ASG incorrectly?
+- What is the plan if the compromised host runs a **shared service** (CI runner, bastion legacy, monitoring agent, license server)?
+- How would security handle a suspect instance that is the **only** task in a critical path before a launch or event window?
+- When is it appropriate to apply an **inline deny-all** on an IAM role vs rotate credentials vs detach the instance profile?
+- How does security avoid **breaking application connectivity** when tightening SG egress during an active incident?
+- What steps are taken before **rotating Secrets Manager** credentials used by a live RDS-backed app?
+- How does security investigate **without disabling** CloudTrail, VPC Flow Logs, or centralized logging (and what if an attacker already did)?
+- How are **false positives** ruled out before production containment (e.g., pen test IP, known scanner, approved vendor)?
+
+### Likely questions: collaboration and escalation
+
+- Who does security call **first** when a finding touches production: platform on-call, app owner, or both?
+- How are **runbooks** shared so platform can execute quarantine steps if security is off-hours?
+- Describe a time security **pushed back** on a risky change; describe a time security **expedited** a fix for platform.
+- How does security handle **disagreement** when risk acceptance differs (ship now vs block deploy)?
+- What tooling access does security need in member accounts, and how is that **least-privilege** without blocking platform automation roles?
+
+### Likely questions: governance actions with production blast radius
+
+- Would security deploy an **org-wide SCP** during an active incident? Under what conditions?
+- How are **SCP changes** tested in sandbox OUs before production OUs?
+- What is the approach to **revoking cross-account roles** that platform pipelines use?
+- How does security remediate **public S3 or public RDS** without deleting data or breaking a live integration?
+- How are **Session Manager** sessions handled during IR (forensics vs operator access conflicting)?
+
+### Scenario prompts (multi-part, very common)
+
+**"GuardDuty flagged production instance `i-abc` in the payment OU. It's still serving traffic. What do you do?"**
+
+Hit: confirm finding, loop platform on-call, snapshot/isolate options, preserve ASG capacity (launch replacement from clean AMI if needed), investigate in parallel, no unilateral terminate, post-incident hardening via launch template not one-off console edits.
+
+**"We need to block an IP globally. Security wants to change the NACL. Concerns?"**
+
+Hit: NACL is coarse and stateless; SG or WAF may be safer; shared subnets affect many instances; document rollback; prefer scoped block at WAF/ALB if HTTP-only threat.
+
+**"Security wants to enable a new Config rule tomorrow that will flag half our SGs."**
+
+Hit: pilot in non-prod OU, exception process for legacy, remediation playbook, pipeline integration, metrics on fix rate, not big-bang prod enforcement without notice.
+
+### Answer hooks that resonate with platform engineers
+
+- **"Contain first, kill last"** … quarantine SG and session revoke preserve disk and config for root cause; rebuild is planned with platform.
+- **"Shared fate"** … before touching TGW, DNS, or org logging, identify dependents on a architecture diagram or CMDB.
+- **"Reversible by design"** … tag `OriginalSecurityGroups`, use break-glass roles with time bounds, document rollback in the ticket.
+- **"Same path as normal changes"** … post-incident fixes land in **Terraform/launch templates**, not permanent console exceptions.
+- **"Availability is a security property"** … ransomware and destructive API calls are outages; controlled containment protects both.
+
+
+---
+
 ## Questions to Ask the Platform Team
 
 Thoughtful questions show partnership mindset:
@@ -431,7 +520,9 @@ Thoughtful questions show partnership mindset:
 - [ ] Re-read recruiter focus areas (this doc §1–7).
 - [ ] Skim [Hands-On Interview Prep.md](Hands-On%20Interview%20Prep.md) quarantine, CloudTrail, SG, and SCP sections only if deeper IR detail is needed (optional; no coding expected).
 - [ ] Prepare 2–3 **collaboration stories** (Wiz Code with studios, SCP/IaC at Sony, IR containment).
+- [ ] Prepare 1 **production-safe IR** story: contained a host without terminate, coordinated with ops, fixed via IaC/launch template.
 - [ ] Prepare 1 **respectful pushback** story (exception denied or narrowed with compensating controls).
+- [ ] Review [Platform Ops and Production-Safe IR](#platform-ops-and-production-safe-ir-likely-questions).
 - [ ] Test Teams audio/video; have a quiet space for 60 minutes.
 - [ ] Keep answers **concise first**, expand when asked; platform interviews run long on one topic if the discussion is good.
 
